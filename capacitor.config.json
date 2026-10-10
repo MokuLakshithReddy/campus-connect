@@ -1,6 +1,6 @@
 {
   "appId": "com.socialfeedconnect.app",
-  "appName": "Social Feed Connect",
+  "appName": "CampusConnect",
   "webDir": "dist",
   "bundledWebRuntime": false,
   "server": {
