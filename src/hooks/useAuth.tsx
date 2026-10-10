@@ -96,12 +96,17 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
     initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!isMounted) return;
       setSession(session);
       setUser(session?.user ?? null);
       if (session?.user) {
-        await fetchProfile(session.user.id);
+        // Defer fetchProfile with setTimeout to avoid Supabase auth navigator.locks deadlock
+        setTimeout(() => {
+          if (isMounted) {
+            fetchProfile(session.user.id);
+          }
+        }, 0);
       } else {
         setProfile(null);
         setMustChangePassword(false);
@@ -143,17 +148,31 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const completePasswordChange = async (newPassword: string) => {
     if (!user) throw new Error("No authenticated user");
 
-    // 1. Update Supabase Auth password
-    const { error: updateError } = await supabase.auth.updateUser({
-      password: newPassword,
-    });
-    if (updateError) throw updateError;
+    // Timeout helper to avoid infinite hanging
+    const withTimeout = <T,>(promise: Promise<T>, ms: number, errorMsg: string): Promise<T> => {
+      return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error(errorMsg)), ms)),
+      ]);
+    };
 
-    // 2. Mark profile as password changed via secure RPC
-    const { error: rpcError } = await supabase.rpc("complete_first_time_password_change");
+    // 1. Mark profile as password changed via secure RPC first
+    const { error: rpcError } = await withTimeout(
+      supabase.rpc("complete_first_time_password_change"),
+      10000,
+      "Profile update timed out. Please check your network connection."
+    );
     if (rpcError) throw rpcError;
 
-    // 3. Update local state
+    // 2. Update Supabase Auth password
+    const { error: updateError } = await withTimeout(
+      supabase.auth.updateUser({ password: newPassword }),
+      10000,
+      "Auth password update timed out. Please try again."
+    );
+    if (updateError) throw updateError;
+
+    // 3. Update local state immediately
     setMustChangePassword(false);
     if (profile) {
       setProfile({

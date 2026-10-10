@@ -26,7 +26,7 @@ const ChangePassword = () => {
       return;
     }
 
-    if (newPassword === confirmPassword === false) {
+    if (newPassword !== confirmPassword) {
       toast.error("Passwords do not match. Please re-enter.");
       return;
     }
@@ -41,7 +41,10 @@ const ChangePassword = () => {
     try {
       await completePasswordChange(newPassword);
       toast.success("Password set successfully! Welcome to CampusConnect.");
-      navigate("/", { replace: true });
+      // Short delay to ensure state and toast register smoothly before navigation
+      setTimeout(() => {
+        navigate("/", { replace: true });
+      }, 100);
     } catch (err: unknown) {
       const error = err as Error;
       toast.error(error.message || "Failed to update password. Please try again.");
