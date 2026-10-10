@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   student_id TEXT,
   college_role TEXT NOT NULL DEFAULT 'student' CHECK (college_role IN ('student', 'faculty', 'college_admin')),
   is_verified BOOLEAN NOT NULL DEFAULT false,
+  must_change_password BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -136,6 +137,16 @@ BEGIN
       -- Silently reset privilege columns to existing values
       NEW.college_role := OLD.college_role;
       NEW.is_verified := OLD.is_verified;
+    END IF;
+  END IF;
+
+  -- Protect must_change_password from unauthorized direct manipulation
+  IF (OLD.must_change_password IS DISTINCT FROM NEW.must_change_password) THEN
+    IF current_setting('campus.in_password_change', true) IS DISTINCT FROM 'true' THEN
+      SELECT college_role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
+      IF v_caller_role IS DISTINCT FROM 'college_admin' THEN
+        NEW.must_change_password := OLD.must_change_password;
+      END IF;
     END IF;
   END IF;
 
@@ -375,7 +386,7 @@ BEGIN
     is_edu_domain := true;
   END IF;
 
-  INSERT INTO public.profiles (id, username, department, year, student_id, college_role, is_verified)
+  INSERT INTO public.profiles (id, username, department, year, student_id, college_role, is_verified, must_change_password)
   VALUES (
     NEW.id,
     final_username,
@@ -383,7 +394,8 @@ BEGIN
     COALESCE(yr, '1st Year'),
     s_id,
     'student',
-    is_edu_domain
+    is_edu_domain,
+    COALESCE((NEW.raw_user_meta_data->>'must_change_password')::boolean, true)
   )
   ON CONFLICT (id) DO UPDATE SET
     username = EXCLUDED.username,
@@ -673,6 +685,27 @@ BEGIN
   WHERE id = p_user_id;
 
   RETURN jsonb_build_object('success', true, 'user_id', p_user_id, 'is_verified', p_is_verified);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- FIRST TIME PASSWORD CHANGE COMPLETION RPC
+CREATE OR REPLACE FUNCTION public.complete_first_time_password_change()
+RETURNS JSONB AS $$
+DECLARE
+  v_user_id UUID := auth.uid();
+BEGIN
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Not authenticated';
+  END IF;
+
+  PERFORM set_config('campus.in_password_change', 'true', true);
+
+  UPDATE public.profiles
+  SET must_change_password = false,
+      updated_at = now()
+  WHERE id = v_user_id;
+
+  RETURN jsonb_build_object('success', true, 'message', 'Password change completed successfully');
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 

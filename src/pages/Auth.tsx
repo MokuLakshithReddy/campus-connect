@@ -4,200 +4,186 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { motion } from "framer-motion";
-import { GraduationCap, ShieldCheck, Loader2 } from "lucide-react";
-
-const DEPARTMENTS = [
-  "Computer Science & Engineering",
-  "Information Technology",
-  "Electronics & Communication",
-  "Electrical & Electronics",
-  "Mechanical Engineering",
-  "Civil Engineering",
-  "Biotechnology",
-  "Business & Management",
-  "Design & Media Arts",
-];
-
-const YEARS = [
-  "1st Year",
-  "2nd Year",
-  "3rd Year",
-  "4th Year",
-  "Postgraduate",
-];
+import { GraduationCap, ShieldCheck, KeyRound, Loader2, Sparkles, Building2 } from "lucide-react";
 
 const Auth = () => {
-  const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail] = useState("");
+  const [rollNumber, setRollNumber] = useState("");
   const [password, setPassword] = useState("");
-  const [username, setUsername] = useState("");
-  const [department, setDepartment] = useState(DEPARTMENTS[0]);
-  const [year, setYear] = useState(YEARS[0]);
-  const [studentId, setStudentId] = useState("");
   const [loading, setLoading] = useState(false);
-  const { signIn, signUp } = useAuth();
+  const [isEmailMode, setIsEmailMode] = useState(false);
+  const { signIn } = useAuth();
   const navigate = useNavigate();
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!rollNumber.trim() || !password) {
+      toast.error("Please enter both your roll number and password");
+      return;
+    }
+
     setLoading(true);
     try {
-      if (isLogin) {
-        await signIn(email.trim(), password);
-        navigate("/");
+      const mustChange = await signIn(rollNumber.trim(), password);
+      if (mustChange) {
+        toast.info("First login detected. Please create your private password.");
+        navigate("/change-password", { replace: true });
       } else {
-        await signUp(email.trim(), password, username.trim(), {
-          department,
-          year,
-          student_id: studentId.trim() || undefined,
-        });
-        toast.success("Student account created! Check your email to verify your login.");
-        setIsLogin(true);
+        toast.success("Welcome back to CampusConnect!");
+        navigate("/", { replace: true });
       }
     } catch (err: unknown) {
       const error = err as Error;
-      if (error?.message?.includes("Failed to fetch") || error?.name === "AuthRetryableFetchError") {
-        toast.error("Unable to connect to Supabase. Please ensure your Supabase project is active.");
+      if (error?.message?.includes("Invalid login credentials")) {
+        toast.error("Invalid credentials. If this is your first login, your password is your roll number.");
+      } else if (error?.message?.includes("Failed to fetch")) {
+        toast.error("Cannot connect to server. Check your connection.");
       } else {
-        toast.error(error.message || "Authentication error occurred");
+        toast.error(error.message || "Failed to authenticate");
       }
     } finally {
       setLoading(false);
     }
   };
 
+  const handleFillDemo = (roll: string) => {
+    setRollNumber(roll);
+    setPassword(roll);
+    setIsEmailMode(false);
+    toast.info(`Filled demo student credentials for ${roll}`);
+  };
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4 py-8">
       <motion.div
-        initial={{ opacity: 0, y: 20 }}
+        initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-sm"
+        className="w-full max-w-sm space-y-4"
       >
-        <div className="mb-6 text-center">
-          <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
-            <GraduationCap className="h-8 w-8" />
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight">CampusConnect</h1>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {isLogin ? "Sign in to access college clubs & events" : "Register your verified student identity"}
-          </p>
-        </div>
+        <Card className="border-border shadow-lg">
+          <CardHeader className="text-center pb-4">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-sm">
+              <GraduationCap className="h-8 w-8" />
+            </div>
+            <CardTitle className="text-2xl font-bold tracking-tight">
+              CampusConnect
+            </CardTitle>
+            <CardDescription className="text-xs text-muted-foreground mt-1">
+              College Club Community & Event Management Platform
+            </CardDescription>
+          </CardHeader>
 
-        <form onSubmit={handleSubmit} className="space-y-3.5">
-          {!isLogin && (
-            <>
+          <CardContent className="space-y-4">
+            <form onSubmit={handleLogin} className="space-y-3.5">
               <div className="space-y-1">
-                <Label htmlFor="auth-username" className="text-xs">Username / Display Name</Label>
+                <Label htmlFor="auth-identifier" className="text-xs font-medium">
+                  {isEmailMode ? "Administrator Email" : "Student Roll Number"}
+                </Label>
                 <Input
-                  id="auth-username"
-                  placeholder="e.g. alex_chen"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  id="auth-identifier"
+                  type={isEmailMode ? "email" : "text"}
+                  placeholder={isEmailMode ? "admin@college.edu" : "e.g. 24CS0142"}
+                  value={rollNumber}
+                  onChange={(e) => setRollNumber(e.target.value)}
+                  required
+                  autoCapitalize={isEmailMode ? "none" : "characters"}
+                  className={`h-10 text-sm ${!isEmailMode ? "font-mono tracking-wide" : ""}`}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="auth-password" className="text-xs font-medium">
+                    Password
+                  </Label>
+                  {!isEmailMode && (
+                    <span className="text-[11px] text-muted-foreground">
+                      First login: roll number
+                    </span>
+                  )}
+                </div>
+                <Input
+                  id="auth-password"
+                  type="password"
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   required
                   className="h-10 text-sm"
                 />
               </div>
 
-              <div className="space-y-1">
-                <Label htmlFor="auth-studentid" className="text-xs">Student ID / Roll Number</Label>
-                <Input
-                  id="auth-studentid"
-                  placeholder="e.g. 24CS0142"
-                  value={studentId}
-                  onChange={(e) => setStudentId(e.target.value)}
-                  required
-                  className="h-10 font-mono text-sm"
-                />
+              <Button
+                type="submit"
+                disabled={loading}
+                className="w-full h-10 mt-1 text-sm font-semibold"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Signing In...
+                  </>
+                ) : (
+                  "Log In"
+                )}
+              </Button>
+            </form>
+
+            {/* College Provisioning Explanation */}
+            <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-[11px] text-muted-foreground space-y-1.5">
+              <div className="flex items-center gap-1.5 font-medium text-foreground">
+                <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
+                <span>College-Provisioned Accounts</span>
               </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <Label htmlFor="auth-dept" className="text-xs">Department</Label>
-                  <select
-                    id="auth-dept"
-                    value={department}
-                    onChange={(e) => setDepartment(e.target.value)}
-                    className="w-full rounded-md border border-input bg-background px-2.5 py-2 text-xs"
-                  >
-                    {DEPARTMENTS.map((d) => (
-                      <option key={d} value={d}>
-                        {d.split(" ")[0]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="auth-year" className="text-xs">Year</Label>
-                  <select
-                    id="auth-year"
-                    value={year}
-                    onChange={(e) => setYear(e.target.value)}
-                    className="w-full rounded-md border border-input bg-background px-2.5 py-2 text-xs"
-                  >
-                    {YEARS.map((y) => (
-                      <option key={y} value={y}>
-                        {y}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </>
-          )}
-
-          <div className="space-y-1">
-            <Label htmlFor="auth-email" className="text-xs">College or Student Email</Label>
-            <Input
-              id="auth-email"
-              type="email"
-              placeholder="student@college.edu"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              className="h-10 text-sm"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <Label htmlFor="auth-pw" className="text-xs">Password</Label>
-            <Input
-              id="auth-pw"
-              type="password"
-              placeholder="••••••••"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={6}
-              className="h-10 text-sm"
-            />
-          </div>
-
-          {!isLogin && (
-            <div className="p-2.5 rounded-lg bg-primary/5 border border-primary/20 text-[11px] text-muted-foreground flex items-start gap-1.5">
-              <ShieldCheck className="h-4 w-4 text-primary shrink-0 mt-0.5" />
-              <span>Accounts using official campus emails (.edu) receive automatic verified student status.</span>
+              <p>
+                Student accounts are created by your campus administration. On your first login, enter your <strong>Roll Number</strong> as both username and temporary password.
+              </p>
             </div>
-          )}
 
-          <Button
-            type="submit"
-            disabled={loading}
-            className="h-10 w-full text-sm font-semibold mt-2"
-          >
-            {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : isLogin ? "Log In" : "Create Student Account"}
-          </Button>
-        </form>
+            {/* Demo Testing Shortcut */}
+            <div className="pt-2 border-t border-border/60">
+              <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-2">
+                <span className="flex items-center gap-1 font-medium text-foreground">
+                  <Sparkles className="h-3 w-3 text-amber-500" />
+                  Quick Demo Accounts
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleFillDemo("24CS0142")}
+                  className="h-8 text-[11px] font-mono border-dashed"
+                >
+                  24CS0142
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleFillDemo("24IT0089")}
+                  className="h-8 text-[11px] font-mono border-dashed"
+                >
+                  24IT0089
+                </Button>
+              </div>
+            </div>
 
-        <div className="mt-5 text-center">
-          <button
-            onClick={() => setIsLogin(!isLogin)}
-            className="text-xs text-primary font-medium hover:underline"
-          >
-            {isLogin ? "New student? Register your campus account" : "Already have an account? Log In"}
-          </button>
-        </div>
+            <div className="text-center pt-1">
+              <button
+                type="button"
+                onClick={() => setIsEmailMode(!isEmailMode)}
+                className="text-[11px] text-muted-foreground hover:text-primary transition-colors inline-flex items-center gap-1"
+              >
+                <Building2 className="h-3 w-3" />
+                {isEmailMode ? "Switch to Student Roll Number Login" : "College Admin / Faculty Email Login"}
+              </button>
+            </div>
+          </CardContent>
+        </Card>
       </motion.div>
     </div>
   );

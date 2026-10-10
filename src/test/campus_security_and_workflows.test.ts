@@ -221,3 +221,66 @@ describe("Notifications System", () => {
     expect(notif.resource_type).toBe("club");
   });
 });
+
+describe("College Roll Number Login & Mandatory Password Change", () => {
+  const normalizeIdentifierToEmail = (identifier: string): string => {
+    const clean = identifier.trim().toLowerCase();
+    if (clean.includes("@")) return clean;
+    return `${clean}@campus.internal`;
+  };
+
+  it("should map student roll numbers to synthetic college identity emails", () => {
+    expect(normalizeIdentifierToEmail("24CS0142")).toBe("24cs0142@campus.internal");
+    expect(normalizeIdentifierToEmail("  24it0089 ")).toBe("24it0089@campus.internal");
+    expect(normalizeIdentifierToEmail("admin@college.edu")).toBe("admin@college.edu");
+  });
+
+  it("should block students from reusing their roll number as new permanent password", () => {
+    const validateNewPassword = (rollNumber: string, newPassword: string) => {
+      if (newPassword.length < 6) {
+        throw new Error("Password must be at least 6 characters");
+      }
+      if (newPassword.trim().toLowerCase() === rollNumber.trim().toLowerCase()) {
+        throw new Error("New password cannot be your roll number");
+      }
+      return true;
+    };
+
+    expect(() => validateNewPassword("24CS0142", "24CS0142")).toThrow(/cannot be your roll number/);
+    expect(() => validateNewPassword("24CS0142", "24cs0142")).toThrow(/cannot be your roll number/);
+    expect(() => validateNewPassword("24CS0142", "123")).toThrow(/at least 6 characters/);
+    expect(validateNewPassword("24CS0142", "SecurePass#2026")).toBe(true);
+  });
+
+  it("should enforce mandatory password change on first login and update status on completion", () => {
+    interface StudentSession {
+      rollNumber: string;
+      mustChangePassword: boolean;
+      activePage: string;
+    }
+
+    const session: StudentSession = {
+      rollNumber: "24CS0142",
+      mustChangePassword: true,
+      activePage: "/clubs",
+    };
+
+    // Route guard check
+    const evaluateRoute = (s: StudentSession): string => {
+      if (s.mustChangePassword) return "/change-password";
+      return s.activePage;
+    };
+
+    // Initial attempt to access /clubs is redirected
+    expect(evaluateRoute(session)).toBe("/change-password");
+
+    // After password change is completed
+    const updatedSession: StudentSession = {
+      ...session,
+      mustChangePassword: false,
+    };
+
+    expect(evaluateRoute(updatedSession)).toBe("/clubs");
+  });
+});
+

@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
+import ChangePassword from "./pages/ChangePassword";
 import Clubs from "./pages/Clubs";
 import ClubWorkspace from "./pages/ClubWorkspace";
 import Events from "./pages/Events";
@@ -22,21 +23,45 @@ import ReleaseUpdateDialog from "@/components/ReleaseUpdateDialog";
 
 const queryClient = new QueryClient();
 
+// Protected Route Guard: Strictly forces password change if mustChangePassword is true
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading } = useAuth();
-  if (loading) return (
-    <div className="flex min-h-screen items-center justify-center">
-      <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-    </div>
-  );
+  const { user, loading, mustChangePassword } = useAuth();
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      </div>
+    );
+  }
   if (!user) return <Navigate to="/auth" replace />;
+  if (mustChangePassword) return <Navigate to="/change-password" replace />;
   return <>{children}</>;
 };
 
+// Guard for the Mandatory Change Password screen
+const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) => {
+  const { user, loading, mustChangePassword } = useAuth();
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      </div>
+    );
+  }
+  if (!user) return <Navigate to="/auth" replace />;
+  // If already changed password, do not allow staying on change password screen
+  if (!mustChangePassword) return <Navigate to="/" replace />;
+  return <>{children}</>;
+};
+
+// Unauthenticated Route Guard
 const AuthRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading } = useAuth();
+  const { user, loading, mustChangePassword } = useAuth();
   if (loading) return null;
-  if (user) return <Navigate to="/" replace />;
+  if (user) {
+    if (mustChangePassword) return <Navigate to="/change-password" replace />;
+    return <Navigate to="/" replace />;
+  }
   return <>{children}</>;
 };
 
@@ -50,6 +75,7 @@ const App = () => (
           <ReleaseUpdateDialog />
           <Routes>
             <Route path="/auth" element={<AuthRoute><Auth /></AuthRoute>} />
+            <Route path="/change-password" element={<ForcePasswordChangeRoute><ChangePassword /></ForcePasswordChangeRoute>} />
             <Route path="/" element={<ProtectedRoute><Index /></ProtectedRoute>} />
             <Route path="/clubs" element={<ProtectedRoute><Clubs /></ProtectedRoute>} />
             <Route path="/club/:clubId" element={<ProtectedRoute><ClubWorkspace /></ProtectedRoute>} />

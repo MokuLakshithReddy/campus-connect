@@ -351,6 +351,7 @@ export type Database = {
           department: string | null
           id: string
           is_verified: boolean
+          must_change_password: boolean
           student_id: string | null
           updated_at: string
           username: string
@@ -364,6 +365,7 @@ export type Database = {
           department?: string | null
           id: string
           is_verified?: boolean
+          must_change_password?: boolean
           student_id?: string | null
           updated_at?: string
           username: string
@@ -377,6 +379,7 @@ export type Database = {
           department?: string | null
           id?: string
           is_verified?: boolean
+          must_change_password?: boolean
           student_id?: string | null
           updated_at?: string
           username?: string
@@ -655,6 +658,10 @@ export type Database = {
           p_user_id: string
           p_is_verified: boolean
         }
+        Returns: Json
+      }
+      complete_first_time_password_change: {
+        Args: Record<PropertyKey, never>
         Returns: Json
       }
     }
