@@ -778,17 +778,50 @@ CREATE POLICY "Admins or presidents update clubs" ON public.clubs
     EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
   );
 
+-- HELPER FUNCTIONS FOR NON-RECURSIVE RLS EVALUATION
+CREATE OR REPLACE FUNCTION public.is_club_organizer_or_admin(p_club_id UUID, p_user_id UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+  IF p_user_id IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.profiles WHERE id = p_user_id AND college_role = 'college_admin') THEN
+    RETURN TRUE;
+  END IF;
+
+  RETURN EXISTS (
+    SELECT 1 FROM public.club_memberships
+    WHERE club_id = p_club_id AND user_id = p_user_id AND role IN ('president', 'organizer') AND status = 'active'
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+
+CREATE OR REPLACE FUNCTION public.is_active_club_member_or_admin(p_club_id UUID, p_user_id UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+  IF p_user_id IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.profiles WHERE id = p_user_id AND college_role = 'college_admin') THEN
+    RETURN TRUE;
+  END IF;
+
+  RETURN EXISTS (
+    SELECT 1 FROM public.club_memberships
+    WHERE club_id = p_club_id AND user_id = p_user_id AND status = 'active'
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+
 -- CLUB MEMBERSHIPS POLICIES
 CREATE POLICY "View active memberships or own request" ON public.club_memberships
   FOR SELECT TO authenticated
   USING (
     status = 'active' OR
     user_id = auth.uid() OR
-    EXISTS (
-      SELECT 1 FROM public.club_memberships cm
-      WHERE cm.club_id = club_memberships.club_id AND cm.user_id = auth.uid() AND cm.role IN ('president', 'organizer') AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_club_organizer_or_admin(club_id, auth.uid())
   );
 
 CREATE POLICY "Request club membership" ON public.club_memberships
@@ -800,22 +833,14 @@ CREATE POLICY "Request club membership" ON public.club_memberships
 CREATE POLICY "Organizers or admins update membership" ON public.club_memberships
   FOR UPDATE TO authenticated
   USING (
-    EXISTS (
-      SELECT 1 FROM public.club_memberships cm
-      WHERE cm.club_id = club_memberships.club_id AND cm.user_id = auth.uid() AND cm.role IN ('president', 'organizer') AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_club_organizer_or_admin(club_id, auth.uid())
   );
 
 CREATE POLICY "Leave club or remove membership" ON public.club_memberships
   FOR DELETE TO authenticated
   USING (
     auth.uid() = user_id OR
-    EXISTS (
-      SELECT 1 FROM public.club_memberships cm
-      WHERE cm.club_id = club_memberships.club_id AND cm.user_id = auth.uid() AND cm.role IN ('president', 'organizer') AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_club_organizer_or_admin(club_id, auth.uid())
   );
 
 -- CLUB CHANNELS POLICIES
@@ -832,11 +857,7 @@ CREATE POLICY "Active members view channels" ON public.club_channels
 CREATE POLICY "Organizers create channels" ON public.club_channels
   FOR INSERT TO authenticated
   WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM public.club_memberships cm
-      WHERE cm.club_id = club_channels.club_id AND cm.user_id = auth.uid() AND cm.role IN ('president', 'organizer') AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_club_organizer_or_admin(club_id, auth.uid())
   );
 
 -- CHANNEL MESSAGES POLICIES
@@ -845,40 +866,20 @@ CREATE POLICY "Active members view channel messages" ON public.channel_messages
   USING (
     EXISTS (
       SELECT 1 FROM public.club_channels cc
-      JOIN public.club_memberships cm ON cc.club_id = cm.club_id
-      WHERE cc.id = channel_messages.channel_id AND cm.user_id = auth.uid() AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+      WHERE cc.id = channel_messages.channel_id
+        AND public.is_active_club_member_or_admin(cc.club_id, auth.uid())
+    )
   );
 
 CREATE POLICY "Authorized members post messages" ON public.channel_messages
   FOR INSERT TO authenticated
   WITH CHECK (
-    auth.uid() = sender_id AND (
-      (
-        EXISTS (
-          SELECT 1 FROM public.club_channels cc
-          JOIN public.club_memberships cm ON cc.club_id = cm.club_id
-          WHERE cc.id = channel_messages.channel_id
-            AND cm.user_id = auth.uid()
-            AND cc.type = 'announcements'
-            AND cm.role IN ('president', 'organizer')
-            AND cm.status = 'active'
-        )
-      )
-      OR
-      (
-        EXISTS (
-          SELECT 1 FROM public.club_channels cc
-          JOIN public.club_memberships cm ON cc.club_id = cm.club_id
-          WHERE cc.id = channel_messages.channel_id
-            AND cm.user_id = auth.uid()
-            AND cc.type != 'announcements'
-            AND cm.status = 'active'
-        )
-      )
-      OR
-      EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    auth.uid() = sender_id AND
+    EXISTS (
+      SELECT 1 FROM public.club_channels cc
+      WHERE cc.id = channel_messages.channel_id
+        AND public.is_active_club_member_or_admin(cc.club_id, auth.uid())
+        AND (cc.type != 'announcements' OR public.is_club_organizer_or_admin(cc.club_id, auth.uid()))
     )
   );
 
@@ -887,31 +888,19 @@ CREATE POLICY "View published events or organizer drafts" ON public.events
   FOR SELECT TO authenticated
   USING (
     is_published = true OR
-    EXISTS (
-      SELECT 1 FROM public.club_memberships cm
-      WHERE cm.club_id = events.club_id AND cm.user_id = auth.uid() AND cm.role IN ('president', 'organizer') AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_club_organizer_or_admin(club_id, auth.uid())
   );
 
 CREATE POLICY "Organizers create events" ON public.events
   FOR INSERT TO authenticated
   WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM public.club_memberships cm
-      WHERE cm.club_id = events.club_id AND cm.user_id = auth.uid() AND cm.role IN ('president', 'organizer') AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_club_organizer_or_admin(club_id, auth.uid())
   );
 
 CREATE POLICY "Organizers update events" ON public.events
   FOR UPDATE TO authenticated
   USING (
-    EXISTS (
-      SELECT 1 FROM public.club_memberships cm
-      WHERE cm.club_id = events.club_id AND cm.user_id = auth.uid() AND cm.role IN ('president', 'organizer') AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_club_organizer_or_admin(club_id, auth.uid())
   );
 
 -- EVENT REGISTRATIONS POLICIES (Strict Privacy)
@@ -921,13 +910,9 @@ CREATE POLICY "Attendee or organizer views registration" ON public.event_registr
     auth.uid() = user_id OR
     EXISTS (
       SELECT 1 FROM public.events ev
-      JOIN public.club_memberships cm ON ev.club_id = cm.club_id
       WHERE ev.id = event_registrations.event_id
-        AND cm.user_id = auth.uid()
-        AND cm.role IN ('president', 'organizer')
-        AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+        AND public.is_club_organizer_or_admin(ev.club_id, auth.uid())
+    )
   );
 
 CREATE POLICY "User inserts own registration" ON public.event_registrations
@@ -942,13 +927,9 @@ CREATE POLICY "User or organizer updates registration" ON public.event_registrat
     auth.uid() = user_id OR
     EXISTS (
       SELECT 1 FROM public.events ev
-      JOIN public.club_memberships cm ON ev.club_id = cm.club_id
       WHERE ev.id = event_registrations.event_id
-        AND cm.user_id = auth.uid()
-        AND cm.role IN ('president', 'organizer')
-        AND cm.status = 'active'
-    ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+        AND public.is_club_organizer_or_admin(ev.club_id, auth.uid())
+    )
   );
 
 CREATE POLICY "User cancels own registration" ON public.event_registrations

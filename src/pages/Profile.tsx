@@ -96,59 +96,71 @@ const Profile = () => {
         }
       }
 
-      setProfile(profileData);
+      if (profileData) {
+        setProfile(profileData);
+      }
 
-      // 2. Fetch Joined Clubs
-      const { data: memberships } = await supabase
-        .from("club_memberships")
-        .select(`
-          role,
-          clubs:club_id (
-            id,
-            name,
-            category
-          )
-        `)
-        .eq("user_id", effectiveUserId)
-        .eq("status", "active");
+      // 2. Fetch Joined Clubs safely
+      try {
+        const { data: memberships } = await supabase
+          .from("club_memberships")
+          .select(`
+            role,
+            clubs:club_id (
+              id,
+              name,
+              category
+            )
+          `)
+          .eq("user_id", effectiveUserId)
+          .eq("status", "active");
 
-      const rawMemberships = (memberships || []) as any[];
-      const clubsList: JoinedClub[] = rawMemberships.map((m) => ({
-        id: m.clubs.id,
-        name: m.clubs.name,
-        category: m.clubs.category,
-        role: m.role,
-      }));
-      setJoinedClubs(clubsList);
+        const rawMemberships = (memberships || []) as any[];
+        const clubsList: JoinedClub[] = rawMemberships
+          .filter((m) => m && m.clubs && m.clubs.id)
+          .map((m) => ({
+            id: m.clubs.id,
+            name: m.clubs.name,
+            category: m.clubs.category || "General",
+            role: m.role,
+          }));
+        setJoinedClubs(clubsList);
+      } catch (clubErr) {
+        console.warn("Could not load clubs for profile:", clubErr);
+      }
 
-      // 3. Fetch Registered Event Passes
-      const { data: regs } = await supabase
-        .from("event_registrations")
-        .select(`
-          qr_code_token,
-          events:event_id (
-            id,
-            title,
-            venue,
-            start_time,
-            clubs:club_id (name)
-          )
-        `)
-        .eq("user_id", effectiveUserId)
-        .eq("status", "registered");
+      // 3. Fetch Registered Event Passes safely
+      try {
+        const { data: regs } = await supabase
+          .from("event_registrations")
+          .select(`
+            qr_code_token,
+            events:event_id (
+              id,
+              title,
+              venue,
+              start_time,
+              clubs:club_id (name)
+            )
+          `)
+          .eq("user_id", effectiveUserId)
+          .eq("status", "registered");
 
-      const rawRegs = (regs || []) as any[];
-      const passes: UserEventPass[] = rawRegs
-        .filter((r) => r.events)
-        .map((r) => ({
-          id: r.events.id,
-          title: r.events.title,
-          venue: r.events.venue,
-          start_time: r.events.start_time,
-          club_name: r.events.clubs?.name || "Campus Club",
-          qr_code_token: r.qr_code_token,
-        }));
-      setEventPasses(passes);
+        const rawRegs = (regs || []) as any[];
+        const passes: UserEventPass[] = rawRegs
+          .filter((r) => r && r.events && r.events.id)
+          .map((r) => ({
+            id: r.events.id,
+            title: r.events.title,
+            venue: r.events.venue,
+            start_time: r.events.start_time,
+            club_name: r.events.clubs?.name || "Campus Club",
+            qr_code_token: r.qr_code_token,
+          }));
+        setEventPasses(passes);
+      } catch (regErr) {
+        console.warn("Could not load event passes for profile:", regErr);
+      }
     } catch (err: any) {
       console.error("Profile load error:", err);
     } finally {
