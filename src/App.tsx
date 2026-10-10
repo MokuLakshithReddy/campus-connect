@@ -57,7 +57,13 @@ const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) =
 // Unauthenticated Route Guard
 const AuthRoute = ({ children }: { children: React.ReactNode }) => {
   const { user, loading, mustChangePassword } = useAuth();
-  if (loading) return null;
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      </div>
+    );
+  }
   if (user) {
     if (mustChangePassword) return <Navigate to="/change-password" replace />;
     return <Navigate to="/" replace />;
