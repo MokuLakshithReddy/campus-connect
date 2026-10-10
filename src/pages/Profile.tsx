@@ -246,7 +246,7 @@ const Profile = () => {
       <header className="sticky top-0 z-40 flex items-center justify-between border-b bg-background/95 backdrop-blur px-4 py-3">
         <div className="flex items-center gap-1.5">
           <GraduationCap className="h-5 w-5 text-primary" />
-          <h1 className="text-base font-semibold">Campus Identity</h1>
+          <h1 className="text-base font-semibold">My Profile & Student ID</h1>
         </div>
         {isOwn && (
           <button onClick={handleSignOut} className="p-1 hover:text-destructive transition-colors" title="Sign out">
@@ -305,14 +305,24 @@ const Profile = () => {
           )}
 
           {isOwn ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-3 w-full rounded-xl text-xs h-8"
-              onClick={() => navigate("/edit-profile")}
-            >
-              Edit College Details
-            </Button>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-xl text-xs h-8"
+                onClick={() => navigate("/edit-profile")}
+              >
+                Edit Details
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-xl text-xs h-8"
+                onClick={() => navigate("/change-password")}
+              >
+                Change Password
+              </Button>
+            </div>
           ) : (
             <div className="mt-3 flex gap-2">
               <Button onClick={handleMessage} className="flex-1 rounded-xl text-xs h-8 gap-1.5">

@@ -10,7 +10,7 @@ const BottomNav = () => {
   const { user } = useAuth();
   const { unreadCount, clearUnread } = useUnreadMessages();
 
-  const profilePath = user?.id ? `/profile/${user.id}` : "/profile";
+  const profilePath = "/profile";
 
   const items = [
     { icon: LayoutDashboard, path: "/", label: "Campus" },
