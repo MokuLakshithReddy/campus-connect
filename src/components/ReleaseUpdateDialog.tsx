@@ -9,7 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { GraduationCap, Users, Calendar, Ticket } from "lucide-react";
 
-export const CURRENT_APP_VERSION = "1.2.5";
+export const CURRENT_APP_VERSION = "1.2.6";
 const STORAGE_KEY = "seen_release_version";
 
 interface ReleaseUpdateDialogProps {

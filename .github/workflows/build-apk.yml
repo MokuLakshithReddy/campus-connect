@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -47,21 +49,27 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
 
-      - name: Prepare APK file
+      - name: Prepare APK files
         run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk campus-connect-v1.2.6.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk campus-connect.apk
           cp android/app/build/outputs/apk/debug/app-debug.apk social-feed-connect.apk
 
       - name: Upload APK as Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: social-feed-connect-apk
-          path: social-feed-connect.apk
+          name: campus-connect-v1.2.6-apk
+          path: campus-connect-v1.2.6.apk
 
       - name: Attach APK to GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || success()
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.1.0' }}
-          files: social-feed-connect.apk
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.2.6' }}
+          name: CampusConnect ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v1.2.6' }}
+          files: |
+            campus-connect-v1.2.6.apk
+            campus-connect.apk
+            social-feed-connect.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
