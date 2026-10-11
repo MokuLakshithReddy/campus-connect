@@ -358,5 +358,93 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
       mustChangePassword: false,
     })).toBe("allowed");
   });
+
+  it("should prevent students from self-assigning president role or active status during membership insertion", () => {
+    interface MembershipInsertPayload {
+      club_id: string;
+      user_id: string;
+      role: string;
+      status: string;
+    }
+
+    const protectMembershipInsertion = (
+      payload: MembershipInsertPayload,
+      callerRole: "student" | "college_admin"
+    ): MembershipInsertPayload => {
+      if (callerRole !== "college_admin") {
+        return {
+          ...payload,
+          role: "member",
+          status: "pending",
+        };
+      }
+      return payload;
+    };
+
+    // Malicious student attempting to insert president/active
+    const forgedRequest: MembershipInsertPayload = {
+      club_id: "club-1",
+      user_id: "student-1",
+      role: "president",
+      status: "active",
+    };
+
+    const securedResult = protectMembershipInsertion(forgedRequest, "student");
+    expect(securedResult.role).toBe("member");
+    expect(securedResult.status).toBe("pending");
+
+    // Admin creating membership
+    const adminResult = protectMembershipInsertion(forgedRequest, "college_admin");
+    expect(adminResult.role).toBe("president");
+    expect(adminResult.status).toBe("active");
+  });
+
+  it("should ensure profile recovery always defaults is_verified to false and college_role to student", () => {
+    interface ProfileRecoveryPayload {
+      id: string;
+      username: string;
+      college_role: string;
+      is_verified: boolean;
+    }
+
+    const protectProfileCreation = (
+      input: Partial<ProfileRecoveryPayload>,
+      callerRole: "student" | "college_admin"
+    ): ProfileRecoveryPayload => {
+      const isPrivileged = callerRole === "college_admin";
+      return {
+        id: input.id || "u-new",
+        username: input.username || "student_user",
+        college_role: isPrivileged ? (input.college_role || "college_admin") : "student",
+        is_verified: isPrivileged ? Boolean(input.is_verified) : false,
+      };
+    };
+
+    // Fallback/recovery path with attempted verification
+    const recoveredProfile = protectProfileCreation(
+      { username: "john", college_role: "college_admin", is_verified: true },
+      "student"
+    );
+
+    expect(recoveredProfile.college_role).toBe("student");
+    expect(recoveredProfile.is_verified).toBe(false);
+  });
+
+  it("should reject client-side notification forging by regular students", () => {
+    const canInsertNotification = (
+      callerRole: "student" | "college_admin",
+      isSecurityDefinerTrigger: boolean
+    ): boolean => {
+      // Security definer triggers (system) and college_admins can insert notifications
+      if (isSecurityDefinerTrigger) return true;
+      if (callerRole === "college_admin") return true;
+      return false; // Regular students are strictly rejected
+    };
+
+    expect(canInsertNotification("student", false)).toBe(false);
+    expect(canInsertNotification("college_admin", false)).toBe(true);
+    expect(canInsertNotification("student", true)).toBe(true);
+  });
 });
+
 

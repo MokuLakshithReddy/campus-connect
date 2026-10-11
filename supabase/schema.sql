@@ -117,20 +117,34 @@ RETURNS TRIGGER AS $$
 DECLARE
   caller_role TEXT;
 BEGIN
+  -- Service role or internal triggers bypass
+  IF auth.role() = 'service_role' OR auth.role() IS NULL THEN
+    RETURN NEW;
+  END IF;
+
   SELECT college_role INTO caller_role
   FROM public.profiles
   WHERE id = auth.uid();
 
-  -- If caller is regular authenticated user (not college_admin or service_role), block modifying privileged fields
-  IF auth.role() = 'authenticated' AND (caller_role IS DISTINCT FROM 'college_admin') THEN
-    IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
-      RAISE EXCEPTION 'Unauthorized: Only college admins can modify college roles';
+  IF TG_OP = 'INSERT' THEN
+    -- When creating/inserting a profile, regular authenticated users cannot self-assign privileged roles or verified status
+    IF caller_role IS DISTINCT FROM 'college_admin' THEN
+      NEW.college_role := 'student';
+      NEW.is_verified := false;
+      NEW.must_change_password := true;
     END IF;
-    IF NEW.is_verified IS DISTINCT FROM OLD.is_verified THEN
-      RAISE EXCEPTION 'Unauthorized: Only college admins can modify verification status';
-    END IF;
-    IF NEW.must_change_password IS DISTINCT FROM OLD.must_change_password AND NEW.must_change_password = false THEN
-      RAISE EXCEPTION 'Unauthorized: Password change flag can only be updated via password reset workflow';
+  ELSIF TG_OP = 'UPDATE' THEN
+    -- If caller is regular authenticated user (not college_admin), block modifying privileged fields
+    IF caller_role IS DISTINCT FROM 'college_admin' THEN
+      IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
+        RAISE EXCEPTION 'Unauthorized: Only college admins can modify college roles';
+      END IF;
+      IF NEW.is_verified IS DISTINCT FROM OLD.is_verified THEN
+        RAISE EXCEPTION 'Unauthorized: Only college admins can modify verification status';
+      END IF;
+      IF NEW.must_change_password IS DISTINCT FROM OLD.must_change_password AND NEW.must_change_password = false THEN
+        RAISE EXCEPTION 'Unauthorized: Password change flag can only be updated via password reset workflow';
+      END IF;
     END IF;
   END IF;
 
@@ -140,9 +154,56 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 DROP TRIGGER IF EXISTS trg_protect_profile_privileges ON public.profiles;
 CREATE TRIGGER trg_protect_profile_privileges
-  BEFORE UPDATE ON public.profiles
+  BEFORE INSERT OR UPDATE ON public.profiles
   FOR EACH ROW
   EXECUTE FUNCTION public.protect_profile_privileges();
+
+-- PRIVILEGE PROTECTION TRIGGER ON PUBLIC.CLUB_MEMBERSHIPS
+CREATE OR REPLACE FUNCTION public.protect_club_membership_privileges()
+RETURNS TRIGGER AS $$
+DECLARE
+  caller_role TEXT;
+  is_admin BOOLEAN := false;
+BEGIN
+  -- Service role or internal triggers bypass
+  IF auth.role() = 'service_role' OR auth.role() IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT college_role INTO caller_role
+  FROM public.profiles
+  WHERE id = auth.uid();
+
+  IF caller_role = 'college_admin' THEN
+    is_admin := true;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    -- Regular students can only request membership as a pending member
+    IF NOT is_admin THEN
+      NEW.role := 'member';
+      NEW.status := 'pending';
+    END IF;
+  ELSIF TG_OP = 'UPDATE' THEN
+    -- Only organizer or admin can update membership
+    IF NOT is_admin AND NOT public.is_club_organizer_or_admin(OLD.club_id, auth.uid()) THEN
+      RAISE EXCEPTION 'Unauthorized: Only club organizers or administrators can modify memberships';
+    END IF;
+
+    -- Only president or college_admin can assign president or organizer role
+    IF (NEW.role IN ('president', 'organizer') AND NEW.role IS DISTINCT FROM OLD.role) THEN
+      IF NOT is_admin AND NOT EXISTS (
+        SELECT 1 FROM public.club_memberships
+        WHERE club_id = OLD.club_id AND user_id = auth.uid() AND role = 'president' AND status = 'active'
+      ) THEN
+        RAISE EXCEPTION 'Unauthorized: Only the club president or college administrator can assign leadership roles';
+      END IF;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- 3. CLUBS TABLE
 CREATE TABLE IF NOT EXISTS public.clubs (
@@ -171,6 +232,12 @@ CREATE TABLE IF NOT EXISTS public.club_memberships (
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE (club_id, user_id)
 );
+
+DROP TRIGGER IF EXISTS trg_protect_club_membership ON public.club_memberships;
+CREATE TRIGGER trg_protect_club_membership
+  BEFORE INSERT OR UPDATE ON public.club_memberships
+  FOR EACH ROW
+  EXECUTE FUNCTION public.protect_club_membership_privileges();
 
 -- 5. CLUB CHANNELS TABLE
 CREATE TABLE IF NOT EXISTS public.club_channels (
@@ -891,7 +958,15 @@ CREATE POLICY "View active memberships or own request" ON public.club_membership
 CREATE POLICY "Request club membership" ON public.club_memberships
   FOR INSERT TO authenticated
   WITH CHECK (
-    auth.uid() = user_id
+    auth.uid() = user_id AND
+    role = 'member' AND
+    status = 'pending'
+  );
+
+CREATE POLICY "Admins insert membership" ON public.club_memberships
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
   );
 
 CREATE POLICY "Organizers or admins update membership" ON public.club_memberships
@@ -1013,6 +1088,8 @@ CREATE POLICY "Users update own notifications" ON public.notifications
   USING (auth.uid() = user_id)
   WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "Authorized system inserts notifications" ON public.notifications
+CREATE POLICY "Admins insert notifications" ON public.notifications
   FOR INSERT TO authenticated
-  WITH CHECK (true);
+  WITH CHECK (
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+  );
