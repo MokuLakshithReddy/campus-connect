@@ -282,5 +282,81 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
 
     expect(evaluateRoute(updatedSession)).toBe("/clubs");
   });
+
+  it("should reject clearing mustChangePassword if database confirmation fails", async () => {
+    let clientMustChangePassword = true;
+
+    const verifyAndComplete = async (mockFetchProfile: () => Promise<{ must_change_password: boolean } | null>) => {
+      const refreshed = await mockFetchProfile();
+      if (!refreshed || refreshed.must_change_password) {
+        clientMustChangePassword = true;
+        throw new Error("Password updated, but setup is not yet confirmed. Please retry.");
+      }
+      clientMustChangePassword = false;
+    };
+
+    // Case 1: Database refresh fails / returns null
+    await expect(verifyAndComplete(async () => null)).rejects.toThrow(
+      /Password updated, but setup is not yet confirmed/
+    );
+    expect(clientMustChangePassword).toBe(true);
+
+    // Case 2: Database still returns must_change_password = true
+    await expect(verifyAndComplete(async () => ({ must_change_password: true }))).rejects.toThrow(
+      /Password updated, but setup is not yet confirmed/
+    );
+    expect(clientMustChangePassword).toBe(true);
+
+    // Case 3: Database confirms must_change_password = false
+    await verifyAndComplete(async () => ({ must_change_password: false }));
+    expect(clientMustChangePassword).toBe(false);
+  });
+
+  it("should fail-closed if profile loading encounters an error or returns null", () => {
+    interface RouteEvalContext {
+      user: { id: string } | null;
+      profile: { id: string } | null;
+      profileError: string | null;
+      mustChangePassword: boolean;
+    }
+
+    const evaluateRouteSecurity = (ctx: RouteEvalContext): "auth" | "error_screen" | "change_password" | "allowed" => {
+      if (!ctx.user) return "auth";
+      if (ctx.profileError || !ctx.profile) return "error_screen";
+      if (ctx.mustChangePassword) return "change_password";
+      return "allowed";
+    };
+
+    // Missing profile or network error must fail-closed to error screen
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: null,
+      profileError: "Network timeout",
+      mustChangePassword: false,
+    })).toBe("error_screen");
+
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: null,
+      profileError: null,
+      mustChangePassword: false,
+    })).toBe("error_screen");
+
+    // Profile loaded but must change password
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: { id: "u-1" },
+      profileError: null,
+      mustChangePassword: true,
+    })).toBe("change_password");
+
+    // Normal verified profile
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: { id: "u-1" },
+      profileError: null,
+      mustChangePassword: false,
+    })).toBe("allowed");
+  });
 });
 
