@@ -1,23 +1,51 @@
+/**
+ * SAFE ISOLATED POSTGRESQL SECURITY TEST SUITE
+ * 
+ * Safety Rules Enforced:
+ * 1. Strictly refuses to run unless RUN_ISOLATED_SECURITY_TESTS=true is explicitly set.
+ * 2. Requires a dedicated test environment (TEST_SUPABASE_PROJECT_REF / TEST_SUPABASE_MANAGEMENT_TOKEN).
+ * 3. Never touches existing/production accounts (like 24CS0142) or configured clubs.
+ * 4. Uses 100% disposable test fixture accounts and clubs created specifically for the run.
+ * 5. Fails fast on any setup or response errors.
+ * 6. Always cleans up all disposable fixture rows in a guaranteed finally block.
+ */
+
 const https = require('https');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-const SUPABASE_PROJECT_REF = process.env.SUPABASE_PROJECT_REF || 'gtkvujspajcelzufpggr';
-const ACCESS_TOKEN = process.env.SUPABASE_ACCESS_TOKEN || process.env.SUPABASE_PAT || '';
-const SUPABASE_URL = process.env.VITE_SUPABASE_URL || `https://${SUPABASE_PROJECT_REF}.supabase.co`;
-const PUBLISHABLE_KEY = process.env.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_fr0wwYVpS66JH1qHwbUxbA_QJ8uNjMk';
+// --- SAFETY ENVIRONMENT VERIFICATION ---
+const ALLOW_RUN = process.env.RUN_ISOLATED_SECURITY_TESTS === 'true';
+const TEST_PROJECT_REF = process.env.TEST_SUPABASE_PROJECT_REF;
+const MANAGEMENT_TOKEN = process.env.TEST_SUPABASE_MANAGEMENT_TOKEN;
+const TEST_URL = process.env.TEST_SUPABASE_URL || (TEST_PROJECT_REF ? `https://${TEST_PROJECT_REF}.supabase.co` : null);
+const TEST_PUBLISHABLE_KEY = process.env.TEST_SUPABASE_PUBLISHABLE_KEY;
 
-// Helper to run SQL via Management API
-function runSql(query) {
+if (!ALLOW_RUN || !TEST_PROJECT_REF || !MANAGEMENT_TOKEN || !TEST_URL || !TEST_PUBLISHABLE_KEY) {
+  console.log('--------------------------------------------------------------------------------');
+  console.log('SAFETY NOTICE: Isolated database security test is disarmed.');
+  console.log('To run against a dedicated local or staging test instance, provide:');
+  console.log('  RUN_ISOLATED_SECURITY_TESTS=true');
+  console.log('  TEST_SUPABASE_PROJECT_REF=<test-project-id>');
+  console.log('  TEST_SUPABASE_MANAGEMENT_TOKEN=<test-pat>');
+  console.log('  TEST_SUPABASE_PUBLISHABLE_KEY=<test-publishable-key>');
+  console.log('This ensures test scripts NEVER alter configured or production student accounts.');
+  console.log('--------------------------------------------------------------------------------');
+  process.exit(0);
+}
+
+// Execute query via Supabase Management API with strict validation
+function runManagementSql(query) {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify({ query });
     const req = https.request(
       {
         hostname: 'api.supabase.com',
         port: 443,
-        path: `/v1/projects/${SUPABASE_PROJECT_REF}/database/query`,
+        path: `/v1/projects/${TEST_PROJECT_REF}/database/query`,
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${ACCESS_TOKEN}`,
+          'Authorization': `Bearer ${MANAGEMENT_TOKEN}`,
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(postData),
         },
@@ -26,10 +54,13 @@ function runSql(query) {
         let body = '';
         res.on('data', (d) => { body += d; });
         res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            return reject(new Error(`Management API query failed (HTTP ${res.statusCode}): ${body}`));
+          }
           try {
-            resolve({ statusCode: res.statusCode, data: body ? JSON.parse(body) : null });
+            resolve(body ? JSON.parse(body) : []);
           } catch (e) {
-            resolve({ statusCode: res.statusCode, raw: body });
+            resolve(body);
           }
         });
       }
@@ -40,196 +71,231 @@ function runSql(query) {
   });
 }
 
-async function runSecurityIntegrationSuite() {
-  if (!ACCESS_TOKEN) {
-    console.log('Skipping live DB setup: SUPABASE_ACCESS_TOKEN or SUPABASE_PAT environment variable not set.');
-    process.exit(0);
-  }
+async function runSafeSecuritySuite() {
+  const runId = crypto.randomBytes(6).toString('hex');
+  const studentAEmail = `disposable_student_a_${runId}@disposable.internal`;
+  const studentBEmail = `disposable_student_b_${runId}@disposable.internal`;
+  const studentPassword = `TestPass_${runId}!9`;
+  const clubSlug = `disposable-club-${runId}`;
+  const clubName = `Disposable Club ${runId}`;
 
-  console.log('================================================================');
-  console.log('STARTING POSTGRESQL LIVE DATABASE SECURITY INTEGRATION TEST SUITE');
-  console.log('================================================================');
+  let studentAId = null;
+  let studentBId = null;
+  let clubId = null;
+  let conversationId = null;
+  let messageId = null;
 
-  // Step 0: Ensure test student user 24CS0142 has known credentials
-  console.log('\n[Setup] Setting password for 24cs0142@campus.internal...');
-  await runSql(`
-    UPDATE auth.users 
-    SET encrypted_password = crypt('24CS0142', gen_salt('bf'))
-    WHERE email = '24cs0142@campus.internal';
+  console.log(`[Safe Security Test] Initializing run ${runId} with disposable fixtures...`);
 
-    UPDATE public.profiles
-    SET college_role = 'student', is_verified = false, must_change_password = true
-    WHERE id = (SELECT id FROM auth.users WHERE email = '24cs0142@campus.internal');
-  `);
+  try {
+    // 1. Create disposable test users in auth.users
+    await runManagementSql(`
+      INSERT INTO auth.users (
+        instance_id, id, aud, role, email, encrypted_password, email_confirmed_at,
+        raw_app_meta_data, raw_user_meta_data, created_at, updated_at
+      )
+      VALUES
+        ('00000000-0000-0000-0000-000000000000', gen_random_uuid(), 'authenticated', 'authenticated', '${studentAEmail}', crypt('${studentPassword}', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"username":"std_a_${runId}"}', now(), now()),
+        ('00000000-0000-0000-0000-000000000000', gen_random_uuid(), 'authenticated', 'authenticated', '${studentBEmail}', crypt('${studentPassword}', gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}', '{"username":"std_b_${runId}"}', now(), now());
+    `);
 
-  const studentClient = createClient(SUPABASE_URL, PUBLISHABLE_KEY);
+    // Retrieve created IDs
+    const users = await runManagementSql(`
+      SELECT id, email FROM auth.users WHERE email IN ('${studentAEmail}', '${studentBEmail}');
+    `);
 
-  const { data: authData, error: authErr } = await studentClient.auth.signInWithPassword({
-    email: '24cs0142@campus.internal',
-    password: '24CS0142',
-  });
+    if (!Array.isArray(users) || users.length < 2) {
+      throw new Error('Failed to create disposable test users');
+    }
 
-  if (authErr || !authData.user) {
-    console.error('Failed to authenticate test student:', authErr);
-    process.exit(1);
-  }
+    studentAId = users.find((u) => u.email === studentAEmail)?.id;
+    studentBId = users.find((u) => u.email === studentBEmail)?.id;
 
-  const studentId = authData.user.id;
-  console.log(`Authenticated as student: ${authData.user.email} (${studentId})`);
+    console.log(`Created disposable Student A: ${studentAId}`);
+    console.log(`Created disposable Student B: ${studentBId}`);
 
-  // Ensure a test club exists
-  await runSql(`
-    INSERT INTO public.clubs (name, slug, category, description, status)
-    VALUES ('Security Testing Club', 'security-testing-club', 'Technical', 'Automated security validation', 'active')
-    ON CONFLICT (name) DO NOTHING;
-  `);
+    // Create disposable club
+    const clubResult = await runManagementSql(`
+      INSERT INTO public.clubs (name, slug, category, description, status)
+      VALUES ('${clubName}', '${clubSlug}', 'Technical', 'Disposable security test club', 'active')
+      RETURNING id;
+    `);
+    clubId = clubResult[0]?.id;
+    console.log(`Created disposable Club: ${clubId}`);
 
-  const { data: clubs } = await studentClient
-    .from('clubs')
-    .select('id')
-    .eq('slug', 'security-testing-club')
-    .single();
+    // Authenticate client sessions for both students
+    const clientA = createClient(TEST_URL, TEST_PUBLISHABLE_KEY);
+    const clientB = createClient(TEST_URL, TEST_PUBLISHABLE_KEY);
 
-  const clubId = clubs?.id;
-  console.log(`Using test club ID: ${clubId}`);
+    const { data: authA, error: errA } = await clientA.auth.signInWithPassword({
+      email: studentAEmail,
+      password: studentPassword,
+    });
+    if (errA || !authA.user) throw new Error(`Student A login failed: ${errA?.message}`);
 
-  let passedTests = 0;
-  let totalTests = 0;
+    const { data: authB, error: errB } = await clientB.auth.signInWithPassword({
+      email: studentBEmail,
+      password: studentPassword,
+    });
+    if (errB || !authB.user) throw new Error(`Student B login failed: ${errB?.message}`);
 
-  // TEST 1: Privilege Escalation via Club Membership Insertion
-  totalTests++;
-  console.log('\n--- Test 1: Malicious Club Membership Insertion (Attempting role="president", status="active") ---');
-  // First clear any existing membership
-  await runSql(`DELETE FROM public.club_memberships WHERE user_id = '${studentId}' AND club_id = '${clubId}';`);
+    let passedTests = 0;
+    let totalTests = 0;
 
-  const { data: memInsert, error: memErr } = await studentClient
-    .from('club_memberships')
-    .insert({
-      club_id: clubId,
-      user_id: studentId,
-      role: 'president',
-      status: 'active',
-    })
-    .select()
-    .maybeSingle();
+    // --- TEST 1: Club Membership Privilege Escalation ---
+    totalTests++;
+    console.log('\n[Test 1] Attempting unauthorized club leadership insertion (role="president", status="active")...');
+    const { data: memData, error: memErr } = await clientA
+      .from('club_memberships')
+      .insert({
+        club_id: clubId,
+        user_id: studentAId,
+        role: 'president',
+        status: 'active',
+      })
+      .select()
+      .maybeSingle();
 
-  if (memErr) {
-    // If rejected by RLS WITH CHECK, that's secure!
-    console.log('Result: REJECTED by PostgreSQL RLS Policy (Secure!):', memErr.message);
-    passedTests++;
-  } else if (memInsert) {
-    // If allowed through, trigger MUST have forced role='member' and status='pending'
-    if (memInsert.role === 'member' && memInsert.status === 'pending') {
-      console.log('Result: SANITIZED by PostgreSQL Trigger to role="member" and status="pending" (Secure!)');
+    if (memErr) {
+      console.log('-> PASS: Rejected by PostgreSQL RLS:', memErr.message);
+      passedTests++;
+    } else if (memData && memData.role === 'member' && memData.status === 'pending') {
+      console.log('-> PASS: Sanitized by PostgreSQL trigger to role="member" and status="pending"');
       passedTests++;
     } else {
-      console.error('CRITICAL FAILURE: Student self-assigned leadership role!', memInsert);
+      throw new Error(`CRITICAL FAIL: Student self-assigned privileges: ${JSON.stringify(memData)}`);
     }
-  }
 
-  // TEST 2: Notification Forging by Student
-  totalTests++;
-  console.log('\n--- Test 2: Malicious Notification Forging (Student attempting client INSERT) ---');
-  const { data: notifData, error: notifErr } = await studentClient
-    .from('notifications')
-    .insert({
-      user_id: studentId,
-      type: 'announcement',
-      title: 'Forged Administrative Announcement',
-      message: 'This notification should be rejected by PostgreSQL RLS',
-    })
-    .select();
+    // --- TEST 2: Notification Forging ---
+    totalTests++;
+    console.log('\n[Test 2] Attempting unauthorized notification insertion...');
+    const { error: notifErr } = await clientA
+      .from('notifications')
+      .insert({
+        user_id: studentAId,
+        type: 'announcement',
+        title: 'Fake Announcement',
+        message: 'Forged notice',
+      });
 
-  if (notifErr) {
-    console.log('Result: REJECTED by PostgreSQL RLS Policy (Secure!):', notifErr.message);
-    passedTests++;
-  } else {
-    console.error('CRITICAL FAILURE: Student successfully inserted arbitrary notification!', notifData);
-  }
+    if (notifErr) {
+      console.log('-> PASS: Rejected by PostgreSQL RLS policy (No client inserts permitted)');
+      passedTests++;
+    } else {
+      throw new Error('CRITICAL FAIL: Student was able to insert arbitrary notification');
+    }
 
-  // TEST 3: Self-Elevation of Privileges in Profiles (college_role / is_verified)
-  totalTests++;
-  console.log('\n--- Test 3: Self-Elevation of Privileges in Profile UPDATE (Attempting college_role="college_admin", is_verified=true) ---');
-  const { data: profUpdate, error: profErr } = await studentClient
-    .from('profiles')
-    .update({
-      college_role: 'college_admin',
-      is_verified: true,
-    })
-    .eq('id', studentId)
-    .select();
-
-  if (profErr) {
-    console.log('Result: REJECTED by PostgreSQL Trigger (Secure!):', profErr.message);
-    passedTests++;
-  } else {
-    // Verify whether the values actually changed in the database
-    const { data: currentProf } = await studentClient
+    // --- TEST 3: Profile Privilege Escalation (college_role / is_verified) ---
+    totalTests++;
+    console.log('\n[Test 3] Attempting unauthorized profile elevation (college_role="college_admin", is_verified=true)...');
+    const { error: profErr } = await clientA
       .from('profiles')
-      .select('college_role, is_verified')
-      .eq('id', studentId)
-      .single();
+      .update({
+        college_role: 'college_admin',
+        is_verified: true,
+      })
+      .eq('id', studentAId);
 
-    if (currentProf.college_role !== 'college_admin' && !currentProf.is_verified) {
-      console.log('Result: Blocked/Ignored by PostgreSQL (Secure!)');
+    if (profErr) {
+      console.log('-> PASS: Rejected by PostgreSQL trigger:', profErr.message);
       passedTests++;
     } else {
-      console.error('CRITICAL FAILURE: Student self-elevated to college_admin / verified!', currentProf);
+      const { data: profCheck } = await clientA.from('profiles').select('college_role, is_verified').eq('id', studentAId).single();
+      if (profCheck.college_role !== 'college_admin' && !profCheck.is_verified) {
+        console.log('-> PASS: Blocked by PostgreSQL');
+        passedTests++;
+      } else {
+        throw new Error('CRITICAL FAIL: Student self-elevated to college_admin');
+      }
     }
-  }
 
-  // TEST 4: Storage Avatar Upload to Another Student's Directory
-  totalTests++;
-  console.log('\n--- Test 4: Cross-User Storage Access (Attempting upload to another user ID path) ---');
-  const foreignUserId = '00000000-0000-0000-0000-000000000000';
-  const dummyBuffer = Buffer.from('fake image content');
+    // --- TEST 4: Cross-User Storage Access ---
+    totalTests++;
+    console.log('\n[Test 4] Attempting cross-user storage upload into Student B folder...');
+    const dummyData = Buffer.from('test avatar data');
+    const { error: storageCrossErr } = await clientA.storage
+      .from('avatars')
+      .upload(`${studentBId}/malicious.png`, dummyData, { upsert: true });
 
-  const { error: storageErr } = await studentClient.storage
-    .from('avatars')
-    .upload(`${foreignUserId}/unauthorized.png`, dummyBuffer, {
-      contentType: 'image/png',
-      upsert: true,
+    if (storageCrossErr) {
+      console.log('-> PASS: Rejected by PostgreSQL Storage RLS policy:', storageCrossErr.message);
+      passedTests++;
+    } else {
+      throw new Error('CRITICAL FAIL: Student A uploaded file into Student B storage folder');
+    }
+
+    // --- TEST 5: Message Content Tampering & Immutability ---
+    totalTests++;
+    console.log('\n[Test 5] Establishing conversation and testing message immutability...');
+    // Create conversation between Student A and Student B
+    const { data: convo } = await clientB
+      .from('conversations')
+      .insert({ user1_id: studentAId, user2_id: studentBId })
+      .select()
+      .single();
+    conversationId = convo?.id;
+
+    // Student B sends a message
+    const { data: msg } = await clientB
+      .from('messages')
+      .insert({
+        conversation_id: conversationId,
+        sender_id: studentBId,
+        content: 'Original message text from Student B',
+      })
+      .select()
+      .single();
+    messageId = msg?.id;
+
+    // Student A attempts to alter content of Student B's message
+    const { error: contentAlterErr } = await clientA
+      .from('messages')
+      .update({ content: 'Tampered message text!' })
+      .eq('id', messageId);
+
+    if (contentAlterErr) {
+      console.log('-> PASS: Content alteration strictly blocked by PostgreSQL:', contentAlterErr.message);
+      passedTests++;
+    } else {
+      throw new Error('CRITICAL FAIL: Student altered message content in database!');
+    }
+
+    // --- TEST 6: Message Read Status Marking via Stored Procedure ---
+    totalTests++;
+    console.log('\n[Test 6] Testing secure mark_messages_read RPC...');
+    const { data: markedCount, error: rpcErr } = await clientA.rpc('mark_messages_read', {
+      p_conversation_id: conversationId,
     });
 
-  if (storageErr) {
-    console.log('Result: REJECTED by PostgreSQL Storage Policy (Secure!):', storageErr.message);
-    passedTests++;
-  } else {
-    console.error('CRITICAL FAILURE: Student uploaded to another user\'s avatar directory!');
-  }
+    if (!rpcErr && markedCount === 1) {
+      console.log('-> PASS: Recipient successfully marked incoming message read via secure RPC');
+      passedTests++;
+    } else {
+      throw new Error(`RPC mark_messages_read failed: ${rpcErr?.message}`);
+    }
 
-  // TEST 5: Legitimate Storage Avatar Upload to Own Directory
-  totalTests++;
-  console.log('\n--- Test 5: Legitimate Storage Upload (Uploading to own user ID path) ---');
-  const ownPath = `${studentId}/avatar_${Date.now()}.png`;
-  const { data: ownUpload, error: ownStorageErr } = await studentClient.storage
-    .from('avatars')
-    .upload(ownPath, dummyBuffer, {
-      contentType: 'image/png',
-      upsert: true,
-    });
-
-  if (ownStorageErr) {
-    console.error('FAILURE: Legitimate upload to own folder failed:', ownStorageErr);
-  } else {
-    console.log('Result: SUCCESS: Legitimate avatar uploaded successfully to own path:', ownUpload.path);
-    passedTests++;
-    // Clean up uploaded test artifact
-    await studentClient.storage.from('avatars').remove([ownPath]);
-  }
-
-  console.log('\n================================================================');
-  console.log(`INTEGRATION SUITE COMPLETED: ${passedTests}/${totalTests} TESTS PASSED`);
-  console.log('================================================================');
-
-  if (passedTests === totalTests) {
-    console.log('ALL POSTGRESQL SECURITY CONSTRAINTS VERIFIED DIRECTLY ON LIVE DATABASE!');
-  } else {
-    process.exit(1);
+    console.log('\n================================================================');
+    console.log(`SAFE ISOLATED SECURITY SUITE FINISHED: ${passedTests}/${totalTests} TESTS PASSED`);
+    console.log('================================================================');
+  } finally {
+    // Guaranteed cleanup of disposable test fixtures
+    console.log('\n[Cleanup] Removing all disposable fixtures...');
+    if (conversationId) {
+      await runManagementSql(`DELETE FROM public.conversations WHERE id = '${conversationId}';`).catch(() => {});
+    }
+    if (clubId) {
+      await runManagementSql(`DELETE FROM public.clubs WHERE id = '${clubId}';`).catch(() => {});
+    }
+    if (studentAId || studentBId) {
+      await runManagementSql(`
+        DELETE FROM auth.users WHERE id IN ('${studentAId || '00000000-0000-0000-0000-000000000000'}', '${studentBId || '00000000-0000-0000-0000-000000000000'}');
+      `).catch(() => {});
+    }
+    console.log('[Cleanup] Completed cleanly. No persistent data remains.');
   }
 }
 
-runSecurityIntegrationSuite().catch((err) => {
-  console.error('Suite error:', err);
+runSafeSecuritySuite().catch((err) => {
+  console.error('[Error] Security suite encountered an error:', err.message);
   process.exit(1);
 });

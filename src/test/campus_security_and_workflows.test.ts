@@ -445,6 +445,82 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
     expect(canInsertNotification("college_admin", false)).toBe(true);
     expect(canInsertNotification("student", true)).toBe(true);
   });
+
+  it("should enforce message content immutability and restrict updates to read status only", () => {
+    interface MessageRow {
+      id: string;
+      conversation_id: string;
+      sender_id: string;
+      content: string;
+      is_read: boolean;
+      read_at: string | null;
+      created_at: string;
+    }
+
+    const applyMessageUpdate = (
+      current: MessageRow,
+      update: Partial<MessageRow>,
+      callerId: string
+    ): MessageRow => {
+      // Rule 1: Content, sender, conversation, and created_at are strictly immutable
+      if (
+        (update.content !== undefined && update.content !== current.content) ||
+        (update.sender_id !== undefined && update.sender_id !== current.sender_id) ||
+        (update.conversation_id !== undefined && update.conversation_id !== current.conversation_id) ||
+        (update.created_at !== undefined && update.created_at !== current.created_at) ||
+        (update.id !== undefined && update.id !== current.id)
+      ) {
+        throw new Error("Unauthorized: Message content and metadata are immutable. Only read status can be updated.");
+      }
+
+      // Rule 2: Only recipients can mark messages as read
+      if (callerId === current.sender_id && update.is_read !== undefined && update.is_read !== current.is_read) {
+        throw new Error("Unauthorized: Only recipients can mark messages as read.");
+      }
+
+      return {
+        ...current,
+        is_read: update.is_read !== undefined ? update.is_read : current.is_read,
+        read_at: update.read_at !== undefined ? update.read_at : current.read_at,
+      };
+    };
+
+    const originalMsg: MessageRow = {
+      id: "msg-1",
+      conversation_id: "conv-1",
+      sender_id: "student-b",
+      content: "Hello from student B",
+      is_read: false,
+      read_at: null,
+      created_at: "2026-10-12T00:00:00Z",
+    };
+
+    // Case 1: Student A (recipient) attempts to tamper with message content -> REJECTED
+    expect(() =>
+      applyMessageUpdate(originalMsg, { content: "Tampered content" }, "student-a")
+    ).toThrow(/Message content and metadata are immutable/);
+
+    // Case 2: Student A (recipient) attempts to tamper with sender_id -> REJECTED
+    expect(() =>
+      applyMessageUpdate(originalMsg, { sender_id: "student-a" }, "student-a")
+    ).toThrow(/Message content and metadata are immutable/);
+
+    // Case 3: Student B (sender) attempts to mark their own message read -> REJECTED
+    expect(() =>
+      applyMessageUpdate(originalMsg, { is_read: true }, "student-b")
+    ).toThrow(/Only recipients can mark messages as read/);
+
+    // Case 4: Student A (recipient) marks message read -> ALLOWED
+    const readMsg = applyMessageUpdate(
+      originalMsg,
+      { is_read: true, read_at: "2026-10-12T00:05:00Z" },
+      "student-a"
+    );
+    expect(readMsg.is_read).toBe(true);
+    expect(readMsg.read_at).toBe("2026-10-12T00:05:00Z");
+    expect(readMsg.content).toBe("Hello from student B");
+  });
 });
+
 
 

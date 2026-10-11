@@ -121,18 +121,13 @@ export const useUnreadMessages = () => {
     };
   }, [user, navigate, fetchUnreadCount]);
 
-  // Mark messages in a conversation as read in the database
+  // Mark messages in a conversation as read in the database via secure RPC
   const clearUnread = async (conversationId?: string) => {
     if (!user) return;
 
     if (conversationId) {
       try {
-        await supabase
-          .from("messages")
-          .update({ is_read: true, read_at: new Date().toISOString() })
-          .eq("conversation_id", conversationId)
-          .neq("sender_id", user.id)
-          .eq("is_read", false);
+        await supabase.rpc("mark_messages_read", { p_conversation_id: conversationId });
       } catch (err) {
         console.error("Failed to mark conversation read:", err);
       }
