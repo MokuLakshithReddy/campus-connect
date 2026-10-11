@@ -60,6 +60,14 @@ const ChatConversation = () => {
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
       setMessages((msgs as unknown as ChatMessage[]) ?? []);
+
+      // Mark incoming messages as read in database
+      await supabase
+        .from("messages")
+        .update({ is_read: true, read_at: new Date().toISOString() })
+        .eq("conversation_id", conversationId)
+        .neq("sender_id", user.id)
+        .eq("is_read", false);
     };
 
     fetchData();
@@ -75,8 +83,17 @@ const ChatConversation = () => {
           table: "messages",
           filter: `conversation_id=eq.${conversationId}`,
         },
-        (payload) => {
-          setMessages((prev) => [...prev, payload.new as ChatMessage]);
+        async (payload) => {
+          const newMsg = payload.new as ChatMessage;
+          setMessages((prev) => [...prev, newMsg]);
+
+          // Automatically mark incoming messages read while active in the chat
+          if (newMsg.sender_id !== user.id) {
+            await supabase
+              .from("messages")
+              .update({ is_read: true, read_at: new Date().toISOString() })
+              .eq("id", newMsg.id);
+          }
         }
       )
       .subscribe();

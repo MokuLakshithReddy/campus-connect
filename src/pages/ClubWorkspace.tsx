@@ -199,18 +199,21 @@ const ClubWorkspace = () => {
 
       if (evData) {
         const rawEvents = evData as unknown as CampusEvent[];
-        const { data: regData } = await supabase
-          .from("event_registrations")
-          .select("event_id, user_id, status");
+        let myRegs: EventRegistration[] = [];
+        if (user?.id) {
+          const { data: regData } = await supabase
+            .from("event_registrations")
+            .select("event_id, user_id, status")
+            .eq("user_id", user.id);
+          myRegs = (regData || []) as unknown as EventRegistration[];
+        }
 
-        const regs = (regData || []) as unknown as EventRegistration[];
         const enrichedEvents: EventWithMeta[] = rawEvents.map((ev) => {
-          const evRegs = regs.filter((r) => r.event_id === ev.id && r.status === "registered");
-          const userReg = regs.some((r) => r.event_id === ev.id && r.user_id === user?.id && r.status === "registered");
+          const isUserReg = myRegs.some((r) => r.event_id === ev.id && r.status === "registered");
           return {
             ...ev,
-            registration_count: evRegs.length,
-            is_registered: userReg,
+            registration_count: ev.registered_count ?? 0,
+            is_registered: isUserReg,
           };
         });
         setEvents(enrichedEvents);

@@ -58,17 +58,20 @@ const Events = () => {
 
       if (evErr) throw evErr;
 
-      // Fetch all registrations
-      const { data: regData } = await supabase
-        .from("event_registrations")
-        .select("event_id, user_id, qr_code_token, status");
+      // Fetch user's own registrations only (individual ticket privacy)
+      let userRegs: EventRegistration[] = [];
+      if (user?.id) {
+        const { data: regData } = await supabase
+          .from("event_registrations")
+          .select("event_id, user_id, qr_code_token, status")
+          .eq("user_id", user.id);
+        userRegs = (regData || []) as unknown as EventRegistration[];
+      }
 
-      const allRegs = (regData || []) as unknown as EventRegistration[];
       const rawEvents = (evData || []) as any[];
 
       const enriched: EventItemWithMeta[] = rawEvents.map((ev) => {
-        const evRegs = allRegs.filter((r) => r.event_id === ev.id && r.status === "registered");
-        const userReg = allRegs.find((r) => r.event_id === ev.id && r.user_id === user?.id && r.status === "registered");
+        const userReg = userRegs.find((r) => r.event_id === ev.id && r.status === "registered");
 
         return {
           id: ev.id,
@@ -85,7 +88,7 @@ const Events = () => {
           created_at: ev.created_at,
           club_name: ev.clubs?.name || "Campus Club",
           club_category: ev.clubs?.category || "Activity",
-          registration_count: evRegs.length,
+          registration_count: ev.registered_count ?? 0,
           is_registered: !!userReg,
           qr_code_token: userReg?.qr_code_token,
         };

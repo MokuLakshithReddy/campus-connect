@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
@@ -10,6 +10,7 @@ interface MessagePayload {
   sender_id: string;
   content: string;
   created_at: string;
+  is_read?: boolean;
 }
 
 export const useUnreadMessages = () => {
@@ -18,20 +19,54 @@ export const useUnreadMessages = () => {
   const [unreadCount, setUnreadCount] = useState(0);
   const convoIdsRef = useRef<Set<string>>(new Set());
 
-  useEffect(() => {
-    if (!user) return;
+  // Database-backed aggregate fetch of unread messages count
+  const fetchUnreadCount = useCallback(async () => {
+    if (!user) {
+      setUnreadCount(0);
+      return;
+    }
 
-    // Fetch user's conversation IDs
-    const init = async () => {
+    try {
+      // 1. Try secure stored procedure aggregate
+      const { data, error } = await supabase.rpc("get_unread_messages_count");
+      if (!error && typeof data === "number") {
+        setUnreadCount(data);
+        return;
+      }
+
+      // 2. Resilient fallback query if RPC is compiling or unavailable
       const { data: convos } = await supabase
         .from("conversations")
         .select("id")
         .or(`user1_id.eq.${user.id},user2_id.eq.${user.id}`);
-      convoIdsRef.current = new Set((convos ?? []).map((c) => c.id));
-    };
-    init();
 
-    // Listen for new messages in real-time
+      const ids = (convos ?? []).map((c) => c.id);
+      convoIdsRef.current = new Set(ids);
+
+      if (ids.length === 0) {
+        setUnreadCount(0);
+        return;
+      }
+
+      const { count } = await supabase
+        .from("messages")
+        .select("id", { count: "exact", head: true })
+        .in("conversation_id", ids)
+        .neq("sender_id", user.id)
+        .eq("is_read", false);
+
+      setUnreadCount(count ?? 0);
+    } catch (err) {
+      console.error("Error fetching unread messages count:", err);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    fetchUnreadCount();
+
+    // Listen for new messages or read state updates in real-time
     const channel = supabase
       .channel(`user-unread-${user.id}`)
       .on(
@@ -71,14 +106,42 @@ export const useUnreadMessages = () => {
           });
         }
       )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "messages" },
+        () => {
+          // Re-synchronize unread count when messages are marked as read in database
+          fetchUnreadCount();
+        }
+      )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user, navigate]);
+  }, [user, navigate, fetchUnreadCount]);
 
-  const clearUnread = () => setUnreadCount(0);
+  // Mark messages in a conversation as read in the database
+  const clearUnread = async (conversationId?: string) => {
+    if (!user) return;
 
-  return { unreadCount, clearUnread };
+    if (conversationId) {
+      try {
+        await supabase
+          .from("messages")
+          .update({ is_read: true, read_at: new Date().toISOString() })
+          .eq("conversation_id", conversationId)
+          .neq("sender_id", user.id)
+          .eq("is_read", false);
+      } catch (err) {
+        console.error("Failed to mark conversation read:", err);
+      }
+    }
+
+    fetchUnreadCount();
+  };
+
+  return { unreadCount, clearUnread, refreshUnreadCount: fetchUnreadCount };
 };
+
+export default useUnreadMessages;
