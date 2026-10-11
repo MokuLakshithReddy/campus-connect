@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT true;
 
 -- 3. CLUBS TABLE
 CREATE TABLE IF NOT EXISTS public.clubs (
@@ -688,26 +689,28 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- FIRST TIME PASSWORD CHANGE COMPLETION RPC
-CREATE OR REPLACE FUNCTION public.complete_first_time_password_change()
-RETURNS JSONB AS $$
-DECLARE
-  v_user_id UUID := auth.uid();
+-- TRUSTED SERVER-SIDE PASSWORD CHANGE TRIGGER (TAMPER-PROOF)
+-- Automatically fires when auth.users.encrypted_password changes in Supabase Auth.
+-- Clients never directly clear must_change_password; it only clears upon actual password update.
+CREATE OR REPLACE FUNCTION public.on_auth_user_password_changed()
+RETURNS TRIGGER AS $$
 BEGIN
-  IF v_user_id IS NULL THEN
-    RAISE EXCEPTION 'Not authenticated';
+  IF (OLD.encrypted_password IS DISTINCT FROM NEW.encrypted_password) THEN
+    PERFORM set_config('campus.in_password_change', 'true', true);
+    UPDATE public.profiles
+    SET must_change_password = false,
+        updated_at = now()
+    WHERE id = NEW.id;
   END IF;
-
-  PERFORM set_config('campus.in_password_change', 'true', true);
-
-  UPDATE public.profiles
-  SET must_change_password = false,
-      updated_at = now()
-  WHERE id = v_user_id;
-
-  RETURN jsonb_build_object('success', true, 'message', 'Password change completed successfully');
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trg_auth_user_password_changed ON auth.users;
+CREATE TRIGGER trg_auth_user_password_changed
+  AFTER UPDATE OF encrypted_password ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.on_auth_user_password_changed();
 
 -- ============================================================================
 -- STRICT ROW LEVEL SECURITY (RLS) POLICIES

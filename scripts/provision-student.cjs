@@ -5,8 +5,16 @@
  */
 const https = require('https');
 
-const SUPABASE_PROJECT_URL = 'gtkvujspajcelzufpggr.supabase.co';
-const SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0a3Z1anNwYWpjZWx6dWZwZ2dyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MzM1OTY4NywiZXhwIjoyMDk4OTM1Njg3fQ.ROTATED_SERVICE_ROLE_KEY';
+const SUPABASE_PROJECT_URL = process.env.VITE_SUPABASE_URL
+  ? process.env.VITE_SUPABASE_URL.replace(/^https?:\/\//, '')
+  : 'gtkvujspajcelzufpggr.supabase.co';
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SERVICE_ROLE_KEY) {
+  console.error("ERROR: SUPABASE_SERVICE_ROLE_KEY environment variable is required.");
+  console.error("Usage: SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER>");
+  process.exit(1);
+}
 
 const rollNumber = (process.argv[2] || '24CS0142').trim().toUpperCase();
 const department = process.argv[3] || 'Computer Science & Engineering';

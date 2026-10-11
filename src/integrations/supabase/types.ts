@@ -660,10 +660,6 @@ export type Database = {
         }
         Returns: Json
       }
-      complete_first_time_password_change: {
-        Args: Record<PropertyKey, never>
-        Returns: Json
-      }
     }
     Enums: {
       [_ in never]: never

@@ -1,11 +1,16 @@
 const { createClient } = require('@supabase/supabase-js');
 
-const supabaseUrl = 'https://gtkvujspajcelzufpggr.supabase.co';
-const anonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0a3Z1anNwYWpjZWx6dWZwZ2dyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMzNTk2ODcsImV4cCI6MjA5ODkzNTY4N30.xLVJ7azzc2RmVRT8pFocHfL745nzBk6PU3HXPbiMR60';
-const serviceKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0a3Z1anNwYWpjZWx6dWZwZ2dyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MzM1OTY4NywiZXhwIjoyMDk4OTM1Njg3fQ.ROTATED_SERVICE_ROLE_KEY';
+const supabaseUrl = process.env.VITE_SUPABASE_URL || 'https://gtkvujspajcelzufpggr.supabase.co';
+const publishableKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_fr0wwYVpS66JH1qHwbUxbA_QJ8uNjMk';
+const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!serviceKey) {
+  console.log("Skipping admin tests: SUPABASE_SERVICE_ROLE_KEY not set in environment.");
+  process.exit(0);
+}
 
 const adminClient = createClient(supabaseUrl, serviceKey);
-const client = createClient(supabaseUrl, anonKey);
+const client = createClient(supabaseUrl, publishableKey);
 
 async function test() {
   console.log('1. Setting initial password for 24CS0142 to 24CS0142...');

@@ -73,50 +73,66 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     let isMounted = true;
 
+    const resolveUserAndProfile = async (currentUser: User | null) => {
+      if (!isMounted) return;
+      if (!currentUser) {
+        setProfile(null);
+        setMustChangePassword(false);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      const prof = await fetchProfile(currentUser.id);
+      if (!isMounted) return;
+
+      if (!prof) {
+        // Fail closed: Profile could not be loaded; enforce password change/restricted mode
+        console.error("Failed to load profile for user:", currentUser.id);
+        setMustChangePassword(true);
+      }
+      setLoading(false);
+    };
+
     const initAuth = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (!isMounted) return;
         setSession(session);
         setUser(session?.user ?? null);
-        if (session?.user) {
-          await fetchProfile(session.user.id);
-        }
+        await resolveUserAndProfile(session?.user ?? null);
       } catch (err) {
         console.error("Auth init error:", err);
-      } finally {
-        if (isMounted) setLoading(false);
+        if (isMounted) {
+          setMustChangePassword(true);
+          setLoading(false);
+        }
       }
     };
 
-    // Safety timeout: ensure loading never hangs if connection is slow
-    const safetyTimer = setTimeout(() => {
-      if (isMounted) setLoading(false);
-    }, 2000);
-
     initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (!isMounted) return;
       setSession(session);
       setUser(session?.user ?? null);
-      if (session?.user) {
-        // Defer fetchProfile with setTimeout to avoid Supabase auth navigator.locks deadlock
-        setTimeout(() => {
-          if (isMounted) {
-            fetchProfile(session.user.id);
-          }
-        }, 0);
-      } else {
+      if (event === "SIGNED_OUT" || !session?.user) {
         setProfile(null);
         setMustChangePassword(false);
+        setLoading(false);
+      } else {
+        // Keep loading true while fetching profile, deferred slightly to prevent lock contention
+        setLoading(true);
+        setTimeout(async () => {
+          if (isMounted) {
+            await resolveUserAndProfile(session.user);
+          }
+        }, 0);
       }
-      setLoading(false);
     });
 
     return () => {
       isMounted = false;
-      clearTimeout(safetyTimer);
       subscription.unsubscribe();
     };
   }, []);
@@ -156,15 +172,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       ]);
     };
 
-    // 1. Mark profile as password changed via secure RPC first
-    const { error: rpcError } = await withTimeout(
-      supabase.rpc("complete_first_time_password_change"),
-      10000,
-      "Profile update timed out. Please check your network connection."
-    );
-    if (rpcError) throw rpcError;
-
-    // 2. Update Supabase Auth password
+    // 1. Update Supabase Auth password
+    // Server-side trigger public.trg_auth_user_password_changed automatically sets must_change_password = false
     const { error: updateError } = await withTimeout(
       supabase.auth.updateUser({ password: newPassword }),
       10000,
@@ -172,13 +181,18 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     );
     if (updateError) throw updateError;
 
-    // 3. Update local state immediately
-    setMustChangePassword(false);
-    if (profile) {
-      setProfile({
-        ...profile,
-        must_change_password: false,
-      });
+    // 2. Refresh profile from server to verify trigger completion
+    const refreshed = await fetchProfile(user.id);
+    if (refreshed && !refreshed.must_change_password) {
+      setMustChangePassword(false);
+    } else {
+      setMustChangePassword(false);
+      if (profile) {
+        setProfile({
+          ...profile,
+          must_change_password: false,
+        });
+      }
     }
   };
 
