@@ -156,15 +156,17 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       ]);
     };
 
-    // 1. Mark profile as password changed via secure RPC first
-    const { error: rpcError } = await withTimeout(
-      supabase.rpc("complete_first_time_password_change"),
-      10000,
-      "Profile update timed out. Please check your network connection."
-    );
-    if (rpcError) throw rpcError;
+    // Only first-time setup needs to clear the mandatory password-change flag.
+    if (mustChangePassword) {
+      const { error: rpcError } = await withTimeout(
+        supabase.rpc("complete_first_time_password_change"),
+        10000,
+        "Profile update timed out. Please check your network connection."
+      );
+      if (rpcError) throw rpcError;
+    }
 
-    // 2. Update Supabase Auth password
+    // Update Supabase Auth password for both mandatory and voluntary changes.
     const { error: updateError } = await withTimeout(
       supabase.auth.updateUser({ password: newPassword }),
       10000,

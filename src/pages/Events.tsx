@@ -58,17 +58,29 @@ const Events = () => {
 
       if (evErr) throw evErr;
 
-      // Fetch all registrations
-      const { data: regData } = await supabase
-        .from("event_registrations")
-        .select("event_id, user_id, qr_code_token, status");
-
-      const allRegs = (regData || []) as unknown as EventRegistration[];
       const rawEvents = (evData || []) as any[];
+      const eventIds = rawEvents.map((ev) => ev.id);
+      const registrationCounts = new Map<string, number>();
+
+      if (eventIds.length > 0) {
+        const { data: statsData, error: statsError } = await supabase.rpc("get_event_registration_stats", {
+          p_event_ids: eventIds,
+        });
+        if (statsError) throw statsError;
+        for (const stat of statsData || []) {
+          registrationCounts.set(stat.event_id, Number(stat.registration_count));
+        }
+      }
+
+      const { data: regData, error: regError } = await supabase
+        .from("event_registrations")
+        .select("event_id, user_id, qr_code_token, status")
+        .eq("user_id", user?.id || "");
+      if (regError) throw regError;
+      const userRegs = (regData || []) as unknown as EventRegistration[];
 
       const enriched: EventItemWithMeta[] = rawEvents.map((ev) => {
-        const evRegs = allRegs.filter((r) => r.event_id === ev.id && r.status === "registered");
-        const userReg = allRegs.find((r) => r.event_id === ev.id && r.user_id === user?.id && r.status === "registered");
+        const userReg = userRegs.find((r) => r.event_id === ev.id && r.status === "registered");
 
         return {
           id: ev.id,
@@ -85,7 +97,7 @@ const Events = () => {
           created_at: ev.created_at,
           club_name: ev.clubs?.name || "Campus Club",
           club_category: ev.clubs?.category || "Activity",
-          registration_count: evRegs.length,
+          registration_count: registrationCounts.get(ev.id) || 0,
           is_registered: !!userReg,
           qr_code_token: userReg?.qr_code_token,
         };

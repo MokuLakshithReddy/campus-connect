@@ -38,9 +38,9 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
-// Guard for the Mandatory Change Password screen
-const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading, mustChangePassword } = useAuth();
+// Authenticated users may open this screen for either first-time setup or a voluntary update.
+const ChangePasswordRoute = ({ children }: { children: React.ReactNode }) => {
+  const { user, loading } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -49,8 +49,6 @@ const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) =
     );
   }
   if (!user) return <Navigate to="/auth" replace />;
-  // If already changed password, do not allow staying on change password screen
-  if (!mustChangePassword) return <Navigate to="/" replace />;
   return <>{children}</>;
 };
 
@@ -81,7 +79,7 @@ const App = () => (
           <ReleaseUpdateDialog />
           <Routes>
             <Route path="/auth" element={<AuthRoute><Auth /></AuthRoute>} />
-            <Route path="/change-password" element={<ForcePasswordChangeRoute><ChangePassword /></ForcePasswordChangeRoute>} />
+            <Route path="/change-password" element={<ChangePasswordRoute><ChangePassword /></ChangePasswordRoute>} />
             <Route path="/" element={<ProtectedRoute><Index /></ProtectedRoute>} />
             <Route path="/clubs" element={<ProtectedRoute><Clubs /></ProtectedRoute>} />
             <Route path="/club/:clubId" element={<ProtectedRoute><ClubWorkspace /></ProtectedRoute>} />

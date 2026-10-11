@@ -115,8 +115,59 @@ CREATE TABLE IF NOT EXISTS public.notifications (
 );
 
 -- ============================================================================
+-- QUERY PERFORMANCE INDEXES
+-- ============================================================================
+
+CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_created
+  ON public.channel_messages(channel_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_club_memberships_user_status
+  ON public.club_memberships(user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_club_memberships_club_status
+  ON public.club_memberships(club_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_event_registrations_event_status
+  ON public.event_registrations(event_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_event_registrations_user
+  ON public.event_registrations(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_events_club_published
+  ON public.events(club_id, is_published);
+
+CREATE INDEX IF NOT EXISTS idx_events_start_time
+  ON public.events(start_time);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+  ON public.notifications(user_id, is_read, created_at DESC);
+
+-- ============================================================================
 -- CRITICAL SECURITY TRIGGERS (DATABASE LEVEL INTEGRITY)
 -- ============================================================================
+
+-- ============================================================================
+-- PRIVACY-PRESERVING EVENT REGISTRATION COUNTS
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION public.get_event_registration_stats(p_event_ids UUID[])
+RETURNS TABLE(event_id UUID, registration_count BIGINT)
+AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  RETURN QUERY
+  SELECT
+    ev.id,
+    COUNT(er.id) FILTER (WHERE er.status = 'registered')
+  FROM public.events ev
+  LEFT JOIN public.event_registrations er ON er.event_id = ev.id
+  WHERE ev.id = ANY(p_event_ids)
+  GROUP BY ev.id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
 
 -- 1. PROTECT PROFILE PRIVILEGES (Anti-Escalation)
 CREATE OR REPLACE FUNCTION public.protect_profile_privileges()
