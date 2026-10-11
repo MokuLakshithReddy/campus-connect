@@ -24,6 +24,74 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 );
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT true;
 
+-- AUTOMATIC PROFILE CREATION TRIGGER ON AUTH SIGNUP / PROVISIONING
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  base_username TEXT;
+  final_username TEXT;
+  dept TEXT;
+  yr TEXT;
+  s_id TEXT;
+  user_email TEXT;
+  is_edu_domain BOOLEAN := false;
+  must_change_pass BOOLEAN := true;
+BEGIN
+  user_email := LOWER(COALESCE(NEW.email, ''));
+  base_username := TRIM(COALESCE(NEW.raw_user_meta_data->>'username', 'student_' || LEFT(NEW.id::text, 6)));
+  IF base_username = '' THEN
+    base_username := 'student_' || LEFT(NEW.id::text, 6);
+  END IF;
+
+  final_username := base_username;
+  IF EXISTS (SELECT 1 FROM public.profiles WHERE username = final_username AND id != NEW.id) THEN
+    final_username := base_username || '_' || LEFT(NEW.id::text, 4);
+  END IF;
+
+  dept := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'department', '')), '');
+  yr := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'year', '')), '');
+  s_id := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'student_id', '')), '');
+
+  IF (NEW.raw_user_meta_data->>'must_change_password') IS NOT NULL THEN
+    must_change_pass := (NEW.raw_user_meta_data->>'must_change_password')::boolean;
+  END IF;
+
+  -- Verification: Check for institutional .edu or college email domain
+  IF user_email LIKE '%.edu' OR user_email LIKE '%college%' OR user_email LIKE '%campus%' OR user_email LIKE '%univ%' THEN
+    is_edu_domain := true;
+  END IF;
+
+  INSERT INTO public.profiles (id, username, department, year, student_id, college_role, is_verified, must_change_password)
+  VALUES (
+    NEW.id,
+    final_username,
+    COALESCE(dept, 'Computer Science & Engineering'),
+    COALESCE(yr, '1st Year'),
+    s_id,
+    'student',
+    is_edu_domain,
+    must_change_pass
+  )
+  ON CONFLICT (id) DO UPDATE SET
+    username = EXCLUDED.username,
+    department = COALESCE(public.profiles.department, EXCLUDED.department),
+    year = COALESCE(public.profiles.year, EXCLUDED.year),
+    student_id = COALESCE(public.profiles.student_id, EXCLUDED.student_id),
+    must_change_password = EXCLUDED.must_change_password;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_new_user();
+
 -- 3. CLUBS TABLE
 CREATE TABLE IF NOT EXISTS public.clubs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

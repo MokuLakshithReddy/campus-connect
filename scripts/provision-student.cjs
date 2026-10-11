@@ -57,10 +57,43 @@ const options = {
 const req = https.request(options, (res) => {
   let body = '';
   res.on('data', chunk => body += chunk);
-  res.on('end', () => {
+  res.on('end', async () => {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       const user = JSON.parse(body);
-      console.log(`✅ Successfully provisioned ${rollNumber} (User ID: ${user.id})`);
+      console.log(`✅ Successfully provisioned ${rollNumber} in auth.users (User ID: ${user.id})`);
+
+      // Verify the profile row in public.profiles table
+      const profileReq = https.request({
+        hostname: SUPABASE_PROJECT_URL,
+        path: `/rest/v1/profiles?id=eq.${user.id}&select=*`,
+        method: 'GET',
+        headers: {
+          'apikey': SERVICE_ROLE_KEY,
+          'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+        }
+      }, (profRes) => {
+        let profBody = '';
+        profRes.on('data', c => profBody += c);
+        profRes.on('end', () => {
+          try {
+            const profiles = JSON.parse(profBody);
+            const prof = profiles[0];
+            if (prof) {
+              console.log(`✅ Verified public.profiles row:`);
+              console.log(`   - Username: ${prof.username}`);
+              console.log(`   - Student ID: ${prof.student_id}`);
+              console.log(`   - College Role: ${prof.college_role}`);
+              console.log(`   - Must Change Password: ${prof.must_change_password}`);
+              console.log(`   - Is Verified: ${prof.is_verified}`);
+            } else {
+              console.warn(`⚠️ Profile row not found for user ${user.id}`);
+            }
+          } catch(e) {
+            console.error('Error verifying profile:', e);
+          }
+        });
+      });
+      profileReq.end();
     } else {
       console.error(`❌ Failed with status ${res.statusCode}:`, body);
     }
