@@ -20,13 +20,24 @@ import Chats from "./pages/Chats";
 import ChatConversation from "./pages/ChatConversation";
 import NotFound from "./pages/NotFound";
 import ReleaseUpdateDialog from "@/components/ReleaseUpdateDialog";
-import AuthErrorScreen from "@/components/AuthErrorScreen";
+import ErrorBoundary from "@/components/ErrorBoundary";
+import OfflineIndicator from "@/components/OfflineIndicator";
 
 const queryClient = new QueryClient();
 
-// Protected Route Guard: Strictly forces password change and verifies profile presence
+const ProfileUnavailable = ({ onRetry, onSignOut }: { onRetry: () => Promise<void>; onSignOut: () => Promise<void> }) => (
+  <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
+    <p role="alert">Your account profile could not be loaded.</p>
+    <div className="flex gap-3">
+      <button className="rounded-md border px-4 py-2" onClick={() => void onRetry()}>Retry</button>
+      <button className="rounded-md border px-4 py-2" onClick={() => void onSignOut()}>Sign out</button>
+    </div>
+  </div>
+);
+
+// Protected pages require an authenticated user with a loaded profile.
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
+  const { user, profile, loading, mustChangePassword, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -103,8 +114,10 @@ const AuthRoute = ({ children }: { children: React.ReactNode }) => {
 };
 
 const App = () => (
+  <ErrorBoundary>
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
+      <OfflineIndicator />
       <Toaster />
       <Sonner />
       <BrowserRouter>
@@ -132,6 +145,7 @@ const App = () => (
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>
+  </ErrorBoundary>
 );
 
 export default App;
