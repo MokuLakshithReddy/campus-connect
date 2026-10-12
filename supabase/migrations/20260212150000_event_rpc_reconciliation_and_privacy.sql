@@ -86,7 +86,8 @@ BEGIN
 
   SELECT * INTO v_reg
   FROM public.event_registrations
-  WHERE event_id = p_event_id AND qr_code_token = p_qr_token;
+  WHERE event_id = p_event_id AND qr_code_token = p_qr_token
+  FOR UPDATE;
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Invalid ticket pass or QR code';
@@ -170,11 +171,59 @@ ALTER FUNCTION public.appoint_club_organizer(UUID) SET search_path = public, pg_
 REVOKE EXECUTE ON FUNCTION public.appoint_club_organizer(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.appoint_club_organizer(UUID) TO authenticated;
 
-ALTER FUNCTION public.verify_student_account(UUID, BOOLEAN) SET search_path = public, pg_temp;
+-- Verify student account definition (Admin only)
+CREATE OR REPLACE FUNCTION public.verify_student_account(p_user_id UUID, p_is_verified BOOLEAN)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_caller_id UUID := auth.uid();
+  v_is_admin BOOLEAN;
+BEGIN
+  SELECT (college_role = 'college_admin') INTO v_is_admin
+  FROM public.profiles WHERE id = v_caller_id;
+
+  IF NOT v_is_admin THEN
+    RAISE EXCEPTION 'Unauthorized: Only college administrators can verify accounts';
+  END IF;
+
+  UPDATE public.profiles
+  SET is_verified = p_is_verified, updated_at = NOW()
+  WHERE id = p_user_id;
+
+  RETURN jsonb_build_object('success', true, 'user_id', p_user_id, 'is_verified', p_is_verified);
+END;
+$$;
+
 REVOKE EXECUTE ON FUNCTION public.verify_student_account(UUID, BOOLEAN) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.verify_student_account(UUID, BOOLEAN) TO authenticated;
 
-ALTER FUNCTION public.complete_first_time_password_change() SET search_path = public, pg_temp;
+-- First-time password change RPC definition
+CREATE OR REPLACE FUNCTION public.complete_first_time_password_change()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_caller_id UUID := auth.uid();
+BEGIN
+  IF v_caller_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  PERFORM set_config('campus.in_password_change', 'true', true);
+
+  UPDATE public.profiles
+  SET must_change_password = false, updated_at = NOW()
+  WHERE id = v_caller_id;
+
+  RETURN jsonb_build_object('success', true, 'message', 'Password change completed successfully');
+END;
+$$;
+
 REVOKE EXECUTE ON FUNCTION public.complete_first_time_password_change() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.complete_first_time_password_change() TO authenticated;
 
@@ -187,7 +236,7 @@ REVOKE SELECT ON public.profiles FROM anon;
 REVOKE SELECT ON public.posts FROM anon;
 REVOKE SELECT ON public.likes FROM anon;
 REVOKE SELECT ON public.comments FROM anon;
-REVOKE SELECT ON public.follows FROM anon;
+REVOKE SELECT ON public.followers FROM anon;
 REVOKE SELECT ON public.events FROM anon;
 REVOKE SELECT ON public.event_registrations FROM anon;
 REVOKE SELECT ON public.clubs FROM anon;
@@ -201,7 +250,7 @@ GRANT SELECT ON public.profiles TO authenticated;
 GRANT SELECT ON public.posts TO authenticated;
 GRANT SELECT ON public.likes TO authenticated;
 GRANT SELECT ON public.comments TO authenticated;
-GRANT SELECT ON public.follows TO authenticated;
+GRANT SELECT ON public.followers TO authenticated;
 GRANT SELECT ON public.events TO authenticated;
 GRANT SELECT ON public.clubs TO authenticated;
 GRANT SELECT ON public.club_memberships TO authenticated;
@@ -231,8 +280,9 @@ CREATE POLICY "Comments are viewable by authenticated users" ON public.comments
   FOR SELECT TO authenticated
   USING (true);
 
-DROP POLICY IF EXISTS "Follows are viewable by everyone" ON public.follows;
-DROP POLICY IF EXISTS "Follows are viewable by authenticated users" ON public.follows;
-CREATE POLICY "Follows are viewable by authenticated users" ON public.follows
+DROP POLICY IF EXISTS "Anyone can view followers" ON public.followers;
+DROP POLICY IF EXISTS "Followers are viewable by everyone" ON public.followers;
+DROP POLICY IF EXISTS "Followers are viewable by authenticated users" ON public.followers;
+CREATE POLICY "Followers are viewable by authenticated users" ON public.followers
   FOR SELECT TO authenticated
   USING (true);

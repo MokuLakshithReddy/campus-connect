@@ -14,6 +14,9 @@ interface UserProfile {
   college_role: "student" | "faculty" | "college_admin";
   is_verified: boolean;
   must_change_password: boolean;
+  department?: string | null;
+  year?: string | null;
+  branch_id?: string | null;
 }
 
 interface AuthContextType {
@@ -44,7 +47,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     try {
       const { data, error } = await supabase
         .from("profiles")
-        .select("student_id, username, college_role, is_verified, must_change_password")
+        .select("student_id, username, college_role, is_verified, must_change_password, department, year, branch_id")
         .eq("id", userId)
         .maybeSingle();
 
@@ -65,6 +68,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         college_role: data.college_role,
         is_verified: data.is_verified,
         must_change_password: Boolean(data.must_change_password),
+        department: (data as any).department ?? null,
+        year: (data as any).year ?? null,
+        branch_id: (data as any).branch_id ?? null,
       };
       setProfile(prof);
       setProfileError(null);

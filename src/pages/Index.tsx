@@ -25,6 +25,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { findBranchForRollNumber, BRANCH_CONFIGS } from "@/lib/academic-branches";
 
 interface UpcomingEvent {
   id: string;
@@ -64,8 +65,13 @@ const Index = () => {
   const [announcements, setAnnouncements] = useState<AnnouncementNotice[]>([]);
   const [featuredClubs, setFeaturedClubs] = useState<FeaturedClub[]>([]);
   const [selectedCategory, setSelectedCategory] = useState("All");
+  const [feedScope, setFeedScope] = useState<"branch" | "college">("branch");
   const [loading, setLoading] = useState(true);
   const [feedError, setFeedError] = useState<string | null>(null);
+
+  // Authoritative student branch resolution
+  const studentBranch = findBranchForRollNumber(profile?.student_id || "") ||
+    BRANCH_CONFIGS.find((b) => profile?.department?.toLowerCase().includes(b.branchCode.toLowerCase()));
 
   const loadCampusFeed = useCallback(async () => {
     try {
@@ -261,6 +267,13 @@ const Index = () => {
                   Discover student clubs, attend technical workshops, cultural fests, and stay updated with official notices.
                 </p>
 
+                {studentBranch && (
+                  <div className="inline-flex items-center gap-1.5 rounded-lg bg-background/80 border px-2.5 py-1 text-[11px] font-semibold text-foreground">
+                    <GraduationCap className="h-3.5 w-3.5 text-primary" />
+                    <span>{studentBranch.course} {studentBranch.branchCode} • {studentBranch.admissionYear} Cohort</span>
+                  </div>
+                )}
+
                 {/* Quick Action Navigation Buttons */}
                 <div className="grid grid-cols-3 gap-2 pt-2">
                   <Button
@@ -291,6 +304,40 @@ const Index = () => {
                     My Passes
                   </Button>
                 </div>
+              </div>
+            </div>
+
+            {/* Discovery Scope Selector: Branch-first vs College-wide */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs px-0.5">
+                <span className="font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Community Scope</span>
+                <span className="text-[11px] text-muted-foreground font-medium">
+                  {feedScope === "branch" ? (studentBranch ? studentBranch.displayName : "Your Branch") : "All Campus Departments"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between rounded-xl bg-secondary/50 p-1 border">
+                <button
+                  onClick={() => setFeedScope("branch")}
+                  className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
+                    feedScope === "branch"
+                      ? "bg-background text-foreground shadow-xs border"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <GraduationCap className="h-3.5 w-3.5 text-primary" />
+                  <span>My Branch {studentBranch ? `(${studentBranch.branchCode})` : ""}</span>
+                </button>
+                <button
+                  onClick={() => setFeedScope("college")}
+                  className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
+                    feedScope === "college"
+                      ? "bg-background text-foreground shadow-xs border"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Compass className="h-3.5 w-3.5 text-primary" />
+                  <span>College-wide</span>
+                </button>
               </div>
             </div>
 

@@ -10,7 +10,7 @@ import { toast } from "sonner";
 import { motion } from "framer-motion";
 
 const CreatePost = () => {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<string | null>(null);
@@ -80,7 +80,8 @@ const CreatePost = () => {
         user_id: user.id,
         image_url: path,
         caption: caption.trim(),
-      });
+        branch_id: profile?.branch_id || null,
+      } as any);
       if (insertError) {
         // Rollback uploaded storage file if database record insertion fails
         try {

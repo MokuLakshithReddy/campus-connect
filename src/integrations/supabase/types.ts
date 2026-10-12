@@ -346,6 +346,7 @@ export type Database = {
         Row: {
           avatar_url: string | null
           bio: string | null
+          branch_id: string | null
           college_role: "student" | "faculty" | "college_admin"
           created_at: string
           department: string | null
@@ -360,6 +361,7 @@ export type Database = {
         Insert: {
           avatar_url?: string | null
           bio?: string | null
+          branch_id?: string | null
           college_role?: "student" | "faculty" | "college_admin"
           created_at?: string
           department?: string | null
@@ -374,6 +376,7 @@ export type Database = {
         Update: {
           avatar_url?: string | null
           bio?: string | null
+          branch_id?: string | null
           college_role?: "student" | "faculty" | "college_admin"
           created_at?: string
           department?: string | null
@@ -688,6 +691,12 @@ export type Database = {
           p_conversation_id: string
         }
         Returns: number
+      }
+      resolve_student_branch: {
+        Args: {
+          p_roll_number: string
+        }
+        Returns: Json
       }
     }
     Enums: {

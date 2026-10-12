@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { findBranchForRollNumber } from "@/lib/academic-branches";
 
 interface UserProfileData {
   id: string;
@@ -328,10 +329,21 @@ const Profile = () => {
               </p>
               <p className="text-xs text-muted-foreground">{effectiveProfile.year || "1st Year"}</p>
               {effectiveProfile.student_id && (
-                <div className="mt-1.5">
+                <div className="mt-1.5 space-y-1">
                   <span className="font-mono text-[11px] bg-background px-2.5 py-0.5 rounded border text-foreground font-semibold inline-block">
                     ROLL: {effectiveProfile.student_id}
                   </span>
+                  {(() => {
+                    const branch = findBranchForRollNumber(effectiveProfile.student_id);
+                    if (!branch) return null;
+                    return (
+                      <div>
+                        <span className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium inline-block">
+                          {branch.course} {branch.branchCode} • {branch.admissionYear} Cohort
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>

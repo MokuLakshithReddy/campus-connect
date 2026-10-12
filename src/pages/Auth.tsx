@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { toast } from "sonner";
 import { motion } from "framer-motion";
 import { GraduationCap, ShieldCheck, KeyRound, Loader2, Sparkles, Building2, Eye, EyeOff } from "lucide-react";
+import { normalizeRollNumber, findBranchForRollNumber } from "@/lib/academic-branches";
 
 const Auth = () => {
   const [rollNumber, setRollNumber] = useState("");
@@ -25,9 +26,19 @@ const Auth = () => {
       return;
     }
 
+    const normalized = isEmailMode ? rollNumber.trim() : normalizeRollNumber(rollNumber);
+
+    if (!isEmailMode && normalized.length === 12) {
+      const branch = findBranchForRollNumber(normalized);
+      if (!branch) {
+        toast.error("Unsupported roll number prefix. Please contact campus administration.");
+        return;
+      }
+    }
+
     setLoading(true);
     try {
-      const mustChange = await signIn(rollNumber.trim(), password);
+      const mustChange = await signIn(normalized, password);
       if (mustChange) {
         toast.info("First login detected. Please create your private password.");
         navigate("/change-password", { replace: true });

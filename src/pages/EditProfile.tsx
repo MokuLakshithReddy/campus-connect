@@ -98,14 +98,14 @@ const EditProfile = () => {
       const updatePayload: Record<string, unknown> = {
         username: username.trim(),
         bio: bio.trim(),
-        department,
-        year,
         updated_at: new Date().toISOString(),
       };
 
-      // Only allow updating student_id if not locked by verified status
+      // Only allow updating academic records if not locked by institution verified status
       if (!isStudentIdLocked) {
         updatePayload.student_id = studentId.trim();
+        updatePayload.department = department;
+        updatePayload.year = year;
       }
 
       const { error } = await supabase
@@ -200,11 +200,19 @@ const EditProfile = () => {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">Department / School</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-semibold text-muted-foreground">Department / School</label>
+              {isStudentIdLocked && (
+                <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1">
+                  <Lock className="h-3 w-3" /> Locked
+                </span>
+              )}
+            </div>
             <select
               value={department}
               onChange={(e) => setDepartment(e.target.value)}
-              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
+              disabled={isStudentIdLocked}
+              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm disabled:opacity-75 disabled:bg-muted/50"
             >
               {DEPARTMENTS.map((dept) => (
                 <option key={dept} value={dept}>
@@ -215,11 +223,19 @@ const EditProfile = () => {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">Academic Year</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-semibold text-muted-foreground">Academic Year</label>
+              {isStudentIdLocked && (
+                <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1">
+                  <Lock className="h-3 w-3" /> Locked
+                </span>
+              )}
+            </div>
             <select
               value={year}
               onChange={(e) => setYear(e.target.value)}
-              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
+              disabled={isStudentIdLocked}
+              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm disabled:opacity-75 disabled:bg-muted/50"
             >
               {YEARS.map((yr) => (
                 <option key={yr} value={yr}>

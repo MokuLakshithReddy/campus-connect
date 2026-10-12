@@ -3,17 +3,18 @@ import { supabase } from "@/integrations/supabase/client";
 import AppLayout from "@/components/AppLayout";
 import { getAvatarUrl, getPostImageUrl } from "@/lib/supabase-helpers";
 import { useNavigate } from "react-router-dom";
-import { Search, User, Loader2, RefreshCw, AlertCircle } from "lucide-react";
+import { Search, User, Loader2, RefreshCw, AlertCircle, Filter } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { sanitizeSearchQuery } from "@/lib/utils";
+import { BRANCH_CONFIGS } from "@/lib/academic-branches";
 
 interface ExplorePost {
   id: string;
   image_url: string;
   user_id: string;
   caption?: string | null;
-  profiles: { username: string } | null;
+  profiles: { username: string; department?: string | null } | null;
 }
 
 interface UserSearchResult {
@@ -30,6 +31,7 @@ const Explore = () => {
   const [posts, setPosts] = useState<ExplorePost[]>([]);
   const [matchingUsers, setMatchingUsers] = useState<UserSearchResult[]>([]);
   const [search, setSearch] = useState("");
+  const [selectedBranch, setSelectedBranch] = useState("All");
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
 
@@ -43,7 +45,7 @@ const Explore = () => {
   const userRequestIdRef = useRef(0);
 
   // Database-backed paginated search for posts with stale-response protection
-  const fetchPosts = useCallback(async (query: string, pageNum: number, append = false) => {
+  const fetchPosts = useCallback(async (query: string, pageNum: number, branch: string, append = false) => {
     const requestId = ++postRequestIdRef.current;
     if (pageNum === 0) setLoadingPosts(true);
     else setLoadingMore(true);
@@ -55,13 +57,17 @@ const Explore = () => {
 
       let req = supabase
         .from("posts")
-        .select("id, image_url, user_id, caption, profiles(username)", { count: "exact" })
+        .select("id, image_url, user_id, caption, profiles(username, department)", { count: "exact" })
         .order("created_at", { ascending: false })
         .range(from, to);
 
       const sanitized = sanitizeSearchQuery(query);
       if (sanitized) {
         req = req.ilike("caption", `%${sanitized}%`);
+      }
+
+      if (branch !== "All") {
+        req = req.ilike("caption", `%${branch}%`);
       }
 
       const { data, count, error } = await req;
@@ -87,10 +93,10 @@ const Explore = () => {
   }, []);
 
   // Database-backed search for student profiles with sanitization and race-condition guard
-  const searchUsers = useCallback(async (query: string) => {
+  const searchUsers = useCallback(async (query: string, branch: string) => {
     const requestId = ++userRequestIdRef.current;
     const sanitized = sanitizeSearchQuery(query);
-    if (!sanitized) {
+    if (!sanitized && branch === "All") {
       setMatchingUsers([]);
       setLoadingUsers(false);
       return;
@@ -98,12 +104,19 @@ const Explore = () => {
 
     setLoadingUsers(true);
     try {
-      const { data, error } = await supabase
+      let req = supabase
         .from("profiles")
-        .select("id, username, avatar_url, department, student_id")
-        .or(`username.ilike.%${sanitized}%,student_id.ilike.%${sanitized}%,department.ilike.%${sanitized}%`)
-        .limit(15);
+        .select("id, username, avatar_url, department, student_id");
 
+      if (sanitized) {
+        req = req.or(`username.ilike.%${sanitized}%,student_id.ilike.%${sanitized}%,department.ilike.%${sanitized}%`);
+      }
+
+      if (branch !== "All") {
+        req = req.ilike("department", `%${branch}%`);
+      }
+
+      const { data, error } = await req.limit(15);
       if (error) throw error;
 
       // Discard stale response if a newer search request was initiated
@@ -124,22 +137,22 @@ const Explore = () => {
   useEffect(() => {
     const timer = setTimeout(() => {
       setPage(0);
-      fetchPosts(search, 0, false);
-      searchUsers(search);
+      fetchPosts(search, 0, selectedBranch, false);
+      searchUsers(search, selectedBranch);
     }, 350);
 
     return () => clearTimeout(timer);
-  }, [search, fetchPosts, searchUsers]);
+  }, [search, selectedBranch, fetchPosts, searchUsers]);
 
   const handleLoadMore = () => {
     const nextPage = page + 1;
     setPage(nextPage);
-    fetchPosts(search, nextPage, true);
+    fetchPosts(search, nextPage, selectedBranch, true);
   };
 
   return (
     <AppLayout>
-      <header className="sticky top-0 z-40 bg-background/95 backdrop-blur px-4 py-3 border-b">
+      <header className="sticky top-0 z-40 bg-background/95 backdrop-blur px-4 py-3 border-b space-y-2">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -148,9 +161,39 @@ const Explore = () => {
             onChange={(e) => setSearch(e.target.value)}
             className="h-10 rounded-xl bg-secondary border-0 pl-10 pr-9"
           />
-          {(loadingUsers || loadingPosts) && search.trim() && (
+          {(loadingUsers || loadingPosts) && (search.trim() || selectedBranch !== "All") && (
             <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" />
           )}
+        </div>
+
+        {/* Academic Branch Filters */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 scrollbar-none text-xs">
+          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider shrink-0 mr-0.5 flex items-center gap-1">
+            <Filter className="h-3 w-3" /> Branch:
+          </span>
+          <button
+            onClick={() => setSelectedBranch("All")}
+            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors shrink-0 ${
+              selectedBranch === "All"
+                ? "bg-primary text-primary-foreground"
+                : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+            }`}
+          >
+            All Branches
+          </button>
+          {BRANCH_CONFIGS.map((b) => (
+            <button
+              key={b.branchCode}
+              onClick={() => setSelectedBranch(b.branchCode)}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors shrink-0 ${
+                selectedBranch === b.branchCode
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+              }`}
+            >
+              {b.course} {b.branchCode}
+            </button>
+          ))}
         </div>
       </header>
 
@@ -213,7 +256,7 @@ const Explore = () => {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => fetchPosts(search, 0, false)}
+              onClick={() => fetchPosts(search, 0, selectedBranch, false)}
               className="gap-2"
             >
               <RefreshCw className="h-3.5 w-3.5" /> Retry
