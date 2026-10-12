@@ -22,6 +22,7 @@ interface AuthContextType {
   profile: UserProfile | null;
   mustChangePassword: boolean;
   loading: boolean;
+  profileError: string | null;
   signIn: (rollNumberOrEmail: string, password: string) => Promise<boolean>;
   completePasswordChange: (newPassword: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -37,6 +38,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [mustChangePassword, setMustChangePassword] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   const fetchProfile = async (userId: string) => {
     try {
@@ -46,32 +48,66 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         .eq("id", userId)
         .maybeSingle();
 
-      if (!error && data) {
-        const prof: UserProfile = {
-          student_id: data.student_id,
-          username: data.username,
-          college_role: data.college_role,
-          is_verified: data.is_verified,
-          must_change_password: Boolean(data.must_change_password),
-        };
-        setProfile(prof);
-        setMustChangePassword(Boolean(data.must_change_password));
-        return prof;
+      if (error) {
+        console.error("Database error fetching user profile:", error);
+        setProfileError(`Unable to load profile (${error.message}). Please check network/connection.`);
+        return null;
       }
-    } catch (err) {
-      console.error("Error fetching user profile:", err);
+
+      if (!data) {
+        setProfileError("Account profile record not found. Please contact campus administration.");
+        return null;
+      }
+
+      const prof: UserProfile = {
+        student_id: data.student_id,
+        username: data.username,
+        college_role: data.college_role,
+        is_verified: data.is_verified,
+        must_change_password: Boolean(data.must_change_password),
+      };
+      setProfile(prof);
+      setProfileError(null);
+      setMustChangePassword(Boolean(data.must_change_password));
+      return prof;
+    } catch (err: any) {
+      console.error("Network or unexpected error fetching user profile:", err);
+      setProfileError(err?.message || "Failed to load account profile due to a network error.");
+      return null;
     }
-    return null;
   };
 
   const refreshProfile = async () => {
     if (user?.id) {
+      setLoading(true);
       await fetchProfile(user.id);
+      setLoading(false);
     }
   };
 
   useEffect(() => {
     let isMounted = true;
+
+    const resolveUserAndProfile = async (currentUser: User | null) => {
+      if (!isMounted) return;
+      if (!currentUser) {
+        setProfile(null);
+        setMustChangePassword(false);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      const prof = await fetchProfile(currentUser.id);
+      if (!isMounted) return;
+
+      if (!prof) {
+        // Fail closed: Profile could not be loaded; enforce password change/restricted mode
+        console.error("Failed to load profile for user:", currentUser.id);
+        setMustChangePassword(true);
+      }
+      setLoading(false);
+    };
 
     const initAuth = async () => {
       try {
@@ -79,44 +115,39 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         if (!isMounted) return;
         setSession(session);
         setUser(session?.user ?? null);
-        if (session?.user) {
-          await fetchProfile(session.user.id);
-        }
+        await resolveUserAndProfile(session?.user ?? null);
       } catch (err) {
         console.error("Auth init error:", err);
-      } finally {
-        if (isMounted) setLoading(false);
+        if (isMounted) {
+          setMustChangePassword(true);
+          setLoading(false);
+        }
       }
     };
 
-    // Safety timeout: ensure loading never hangs if connection is slow
-    const safetyTimer = setTimeout(() => {
-      if (isMounted) setLoading(false);
-    }, 2000);
-
     initAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (!isMounted) return;
       setSession(session);
       setUser(session?.user ?? null);
-      if (session?.user) {
-        // Defer fetchProfile with setTimeout to avoid Supabase auth navigator.locks deadlock
-        setTimeout(() => {
-          if (isMounted) {
-            fetchProfile(session.user.id);
-          }
-        }, 0);
-      } else {
+      if (event === "SIGNED_OUT" || !session?.user) {
         setProfile(null);
         setMustChangePassword(false);
+        setLoading(false);
+      } else {
+        // Keep loading true while fetching profile, deferred slightly to prevent lock contention
+        setLoading(true);
+        setTimeout(async () => {
+          if (isMounted) {
+            await resolveUserAndProfile(session.user);
+          }
+        }, 0);
       }
-      setLoading(false);
     });
 
     return () => {
       isMounted = false;
-      clearTimeout(safetyTimer);
       subscription.unsubscribe();
     };
   }, []);
@@ -156,17 +187,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       ]);
     };
 
-    // Only first-time setup needs to clear the mandatory password-change flag.
-    if (mustChangePassword) {
-      const { error: rpcError } = await withTimeout(
-        supabase.rpc("complete_first_time_password_change"),
-        10000,
-        "Profile update timed out. Please check your network connection."
-      );
-      if (rpcError) throw rpcError;
-    }
-
-    // Update Supabase Auth password for both mandatory and voluntary changes.
+    // 1. Update Supabase Auth password
+    // Server-side trigger public.trg_auth_user_password_changed automatically sets must_change_password = false
     const { error: updateError } = await withTimeout(
       supabase.auth.updateUser({ password: newPassword }),
       10000,
@@ -174,19 +196,22 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     );
     if (updateError) throw updateError;
 
-    // 3. Update local state immediately
-    setMustChangePassword(false);
-    if (profile) {
-      setProfile({
-        ...profile,
-        must_change_password: false,
-      });
+    // 2. Strict verification: Refresh profile from database to confirm state
+    const refreshed = await fetchProfile(user.id);
+    if (!refreshed || refreshed.must_change_password) {
+      setMustChangePassword(true);
+      throw new Error(
+        "Password updated, but setup is not yet confirmed. Please retry."
+      );
     }
+
+    setMustChangePassword(false);
   };
 
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
     setProfile(null);
+    setProfileError(null);
     setMustChangePassword(false);
     if (error) throw error;
   };
@@ -217,6 +242,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         profile,
         mustChangePassword,
         loading,
+        profileError,
         signIn,
         completePasswordChange,
         signOut,

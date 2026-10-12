@@ -76,7 +76,7 @@ const Profile = () => {
     department: user.user_metadata?.department || "Computer Science & Engineering",
     year: user.user_metadata?.year || "1st Year",
     college_role: authProfile?.college_role || "student",
-    is_verified: authProfile?.is_verified ?? true,
+    is_verified: authProfile?.is_verified ?? false,
     bio: null,
     avatar_url: null,
   } : null);
@@ -111,7 +111,7 @@ const Profile = () => {
             department: user.user_metadata?.department || "Computer Science & Engineering",
             year: user.user_metadata?.year || "1st Year",
             college_role: "student",
-            is_verified: true,
+            is_verified: false,
           })
           .select("*")
           .maybeSingle();
