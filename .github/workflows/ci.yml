@@ -1,0 +1,43 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  verify:
+    name: Lint, Typecheck, Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Code Quality (Lint)
+        run: npm run lint
+
+      - name: TypeScript Verification
+        run: npx tsc -p tsconfig.app.json --noEmit
+
+      - name: Run Test Suite
+        run: npm test
+
+      - name: Production Build
+        env:
+          VITE_SUPABASE_PROJECT_ID: "gtkvujspajcelzufpggr"
+          VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_fr0wwYVpS66JH1qHwbUxbA_QJ8uNjMk"
+          VITE_SUPABASE_URL: "https://gtkvujspajcelzufpggr.supabase.co"
+        run: npm run build

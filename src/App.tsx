@@ -22,22 +22,13 @@ import NotFound from "./pages/NotFound";
 import ReleaseUpdateDialog from "@/components/ReleaseUpdateDialog";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import OfflineIndicator from "@/components/OfflineIndicator";
+import AuthErrorScreen from "@/components/AuthErrorScreen";
 
 const queryClient = new QueryClient();
 
-const ProfileUnavailable = ({ onRetry, onSignOut }: { onRetry: () => Promise<void>; onSignOut: () => Promise<void> }) => (
-  <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
-    <p role="alert">Your account profile could not be loaded.</p>
-    <div className="flex gap-3">
-      <button className="rounded-md border px-4 py-2" onClick={() => void onRetry()}>Retry</button>
-      <button className="rounded-md border px-4 py-2" onClick={() => void onSignOut()}>Sign out</button>
-    </div>
-  </div>
-);
-
 // Protected pages require an authenticated user with a loaded profile.
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, profile, loading, mustChangePassword, refreshProfile, signOut } = useAuth();
+  const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">

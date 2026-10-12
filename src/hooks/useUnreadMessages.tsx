@@ -28,7 +28,7 @@ export const useUnreadMessages = () => {
 
     try {
       // 1. Try secure stored procedure aggregate
-      const { data, error } = await supabase.rpc("get_unread_messages_count");
+      const { data, error } = await (supabase.rpc as any)("get_unread_messages_count");
       if (!error && typeof data === "number") {
         setUnreadCount(data);
         return;
@@ -48,8 +48,8 @@ export const useUnreadMessages = () => {
         return;
       }
 
-      const { count } = await supabase
-        .from("messages")
+      const { count } = await (supabase
+        .from("messages") as any)
         .select("id", { count: "exact", head: true })
         .in("conversation_id", ids)
         .neq("sender_id", user.id)
@@ -127,7 +127,7 @@ export const useUnreadMessages = () => {
 
     if (conversationId) {
       try {
-        await supabase.rpc("mark_messages_read", { p_conversation_id: conversationId });
+        await (supabase.rpc as any)("mark_messages_read", { p_conversation_id: conversationId });
       } catch (err) {
         console.error("Failed to mark conversation read:", err);
       }
