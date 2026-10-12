@@ -22,6 +22,188 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT true;
+
+-- AUTOMATIC PROFILE CREATION TRIGGER ON AUTH SIGNUP / PROVISIONING
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  base_username TEXT;
+  final_username TEXT;
+  dept TEXT;
+  yr TEXT;
+  s_id TEXT;
+BEGIN
+  base_username := TRIM(COALESCE(NEW.raw_user_meta_data->>'username', 'student_' || LEFT(NEW.id::text, 6)));
+  IF base_username = '' THEN
+    base_username := 'student_' || LEFT(NEW.id::text, 6);
+  END IF;
+
+  final_username := base_username;
+  IF EXISTS (SELECT 1 FROM public.profiles WHERE username = final_username AND id != NEW.id) THEN
+    final_username := base_username || '_' || LEFT(NEW.id::text, 4);
+  END IF;
+
+  dept := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'department', '')), '');
+  yr := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'year', '')), '');
+  s_id := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'student_id', '')), '');
+
+  -- SECURITY HARDENING:
+  -- college_role ALWAYS defaults to 'student' (admin must elevate)
+  -- is_verified ALWAYS defaults to false (must be verified by admin)
+  -- must_change_password ALWAYS defaults to true (untrusted metadata CANNOT override)
+  INSERT INTO public.profiles (
+    id, 
+    username, 
+    department, 
+    year, 
+    student_id, 
+    college_role, 
+    is_verified, 
+    must_change_password
+  )
+  VALUES (
+    NEW.id,
+    final_username,
+    COALESCE(dept, 'Computer Science & Engineering'),
+    COALESCE(yr, '1st Year'),
+    s_id,
+    'student',
+    false,
+    true
+  )
+  ON CONFLICT (id) DO UPDATE SET
+    username = EXCLUDED.username,
+    department = COALESCE(public.profiles.department, EXCLUDED.department),
+    year = COALESCE(public.profiles.year, EXCLUDED.year),
+    student_id = COALESCE(public.profiles.student_id, EXCLUDED.student_id);
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_new_user();
+
+-- AUTOMATIC PASSWORD CHANGE COMPLETION TRIGGER ON AUTH.USERS
+CREATE OR REPLACE FUNCTION public.handle_auth_user_password_changed()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- When password hash changes in auth.users, automatically clear must_change_password in profile
+  IF OLD.encrypted_password IS DISTINCT FROM NEW.encrypted_password THEN
+    UPDATE public.profiles
+    SET must_change_password = false
+    WHERE id = NEW.id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trg_auth_user_password_changed ON auth.users;
+CREATE TRIGGER trg_auth_user_password_changed
+  AFTER UPDATE OF encrypted_password ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_auth_user_password_changed();
+
+-- PRIVILEGE PROTECTION TRIGGER ON PUBLIC.PROFILES
+CREATE OR REPLACE FUNCTION public.protect_profile_privileges()
+RETURNS TRIGGER AS $$
+DECLARE
+  caller_role TEXT;
+BEGIN
+  -- Service role or internal triggers bypass
+  IF auth.role() = 'service_role' OR auth.role() IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT college_role INTO caller_role
+  FROM public.profiles
+  WHERE id = auth.uid();
+
+  IF TG_OP = 'INSERT' THEN
+    -- When creating/inserting a profile, regular authenticated users cannot self-assign privileged roles or verified status
+    IF caller_role IS DISTINCT FROM 'college_admin' THEN
+      NEW.college_role := 'student';
+      NEW.is_verified := false;
+      NEW.must_change_password := true;
+    END IF;
+  ELSIF TG_OP = 'UPDATE' THEN
+    -- If caller is regular authenticated user (not college_admin), block modifying privileged fields
+    IF caller_role IS DISTINCT FROM 'college_admin' THEN
+      IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
+        RAISE EXCEPTION 'Unauthorized: Only college admins can modify college roles';
+      END IF;
+      IF NEW.is_verified IS DISTINCT FROM OLD.is_verified THEN
+        RAISE EXCEPTION 'Unauthorized: Only college admins can modify verification status';
+      END IF;
+      IF NEW.must_change_password IS DISTINCT FROM OLD.must_change_password AND NEW.must_change_password = false THEN
+        RAISE EXCEPTION 'Unauthorized: Password change flag can only be updated via password reset workflow';
+      END IF;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trg_protect_profile_privileges ON public.profiles;
+CREATE TRIGGER trg_protect_profile_privileges
+  BEFORE INSERT OR UPDATE ON public.profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION public.protect_profile_privileges();
+
+-- PRIVILEGE PROTECTION TRIGGER ON PUBLIC.CLUB_MEMBERSHIPS
+CREATE OR REPLACE FUNCTION public.protect_club_membership_privileges()
+RETURNS TRIGGER AS $$
+DECLARE
+  caller_role TEXT;
+  is_admin BOOLEAN := false;
+BEGIN
+  -- Service role or internal triggers bypass
+  IF auth.role() = 'service_role' OR auth.role() IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT college_role INTO caller_role
+  FROM public.profiles
+  WHERE id = auth.uid();
+
+  IF caller_role = 'college_admin' THEN
+    is_admin := true;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    -- Regular students can only request membership as a pending member
+    IF NOT is_admin THEN
+      NEW.role := 'member';
+      NEW.status := 'pending';
+    END IF;
+  ELSIF TG_OP = 'UPDATE' THEN
+    -- Only organizer or admin can update membership
+    IF NOT is_admin AND NOT public.is_club_organizer_or_admin(OLD.club_id, auth.uid()) THEN
+      RAISE EXCEPTION 'Unauthorized: Only club organizers or administrators can modify memberships';
+    END IF;
+
+    -- Only president or college_admin can assign president or organizer role
+    IF (NEW.role IN ('president', 'organizer') AND NEW.role IS DISTINCT FROM OLD.role) THEN
+      IF NOT is_admin AND NOT EXISTS (
+        SELECT 1 FROM public.club_memberships
+        WHERE club_id = OLD.club_id AND user_id = auth.uid() AND role = 'president' AND status = 'active'
+      ) THEN
+        RAISE EXCEPTION 'Unauthorized: Only the club president or college administrator can assign leadership roles';
+      END IF;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- 3. CLUBS TABLE
 CREATE TABLE IF NOT EXISTS public.clubs (
@@ -50,6 +232,12 @@ CREATE TABLE IF NOT EXISTS public.club_memberships (
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE (club_id, user_id)
 );
+
+DROP TRIGGER IF EXISTS trg_protect_club_membership ON public.club_memberships;
+CREATE TRIGGER trg_protect_club_membership
+  BEFORE INSERT OR UPDATE ON public.club_memberships
+  FOR EACH ROW
+  EXECUTE FUNCTION public.protect_club_membership_privileges();
 
 -- 5. CLUB CHANNELS TABLE
 CREATE TABLE IF NOT EXISTS public.club_channels (
@@ -115,59 +303,8 @@ CREATE TABLE IF NOT EXISTS public.notifications (
 );
 
 -- ============================================================================
--- QUERY PERFORMANCE INDEXES
--- ============================================================================
-
-CREATE INDEX IF NOT EXISTS idx_channel_messages_channel_created
-  ON public.channel_messages(channel_id, created_at ASC);
-
-CREATE INDEX IF NOT EXISTS idx_club_memberships_user_status
-  ON public.club_memberships(user_id, status);
-
-CREATE INDEX IF NOT EXISTS idx_club_memberships_club_status
-  ON public.club_memberships(club_id, status);
-
-CREATE INDEX IF NOT EXISTS idx_event_registrations_event_status
-  ON public.event_registrations(event_id, status);
-
-CREATE INDEX IF NOT EXISTS idx_event_registrations_user
-  ON public.event_registrations(user_id);
-
-CREATE INDEX IF NOT EXISTS idx_events_club_published
-  ON public.events(club_id, is_published);
-
-CREATE INDEX IF NOT EXISTS idx_events_start_time
-  ON public.events(start_time);
-
-CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
-  ON public.notifications(user_id, is_read, created_at DESC);
-
--- ============================================================================
 -- CRITICAL SECURITY TRIGGERS (DATABASE LEVEL INTEGRITY)
 -- ============================================================================
-
--- ============================================================================
--- PRIVACY-PRESERVING EVENT REGISTRATION COUNTS
--- ============================================================================
-
-CREATE OR REPLACE FUNCTION public.get_event_registration_stats(p_event_ids UUID[])
-RETURNS TABLE(event_id UUID, registration_count BIGINT)
-AS $$
-BEGIN
-  IF auth.uid() IS NULL THEN
-    RAISE EXCEPTION 'Authentication required';
-  END IF;
-
-  RETURN QUERY
-  SELECT
-    ev.id,
-    COUNT(er.id) FILTER (WHERE er.status = 'registered')
-  FROM public.events ev
-  LEFT JOIN public.event_registrations er ON er.event_id = ev.id
-  WHERE ev.id = ANY(p_event_ids)
-  GROUP BY ev.id;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
 
 -- 1. PROTECT PROFILE PRIVILEGES (Anti-Escalation)
 CREATE OR REPLACE FUNCTION public.protect_profile_privileges()
@@ -405,68 +542,9 @@ CREATE TRIGGER trg_handle_announcement_broadcast
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_announcement_broadcast();
 
--- 6. COLLEGE USER ONBOARDING & VERIFICATION TRIGGER
-CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
-DECLARE
-  base_username TEXT;
-  final_username TEXT;
-  dept TEXT;
-  yr TEXT;
-  s_id TEXT;
-  user_email TEXT;
-  is_edu_domain BOOLEAN := false;
-BEGIN
-  user_email := LOWER(COALESCE(NEW.email, ''));
-  base_username := TRIM(COALESCE(NEW.raw_user_meta_data->>'username', 'student_' || LEFT(NEW.id::text, 6)));
-  IF base_username = '' THEN
-    base_username := 'student_' || LEFT(NEW.id::text, 6);
-  END IF;
-
-  final_username := base_username;
-  IF EXISTS (SELECT 1 FROM public.profiles WHERE username = final_username AND id != NEW.id) THEN
-    final_username := base_username || '_' || LEFT(NEW.id::text, 4);
-  END IF;
-
-  dept := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'department', '')), '');
-  yr := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'year', '')), '');
-  s_id := NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data->>'student_id', '')), '');
-
-  -- Verification: Check for institutional .edu or college email domain
-  IF user_email LIKE '%.edu' OR user_email LIKE '%college%' OR user_email LIKE '%campus%' OR user_email LIKE '%univ%' THEN
-    is_edu_domain := true;
-  END IF;
-
-  INSERT INTO public.profiles (id, username, department, year, student_id, college_role, is_verified, must_change_password)
-  VALUES (
-    NEW.id,
-    final_username,
-    COALESCE(dept, 'Computer Science & Engineering'),
-    COALESCE(yr, '1st Year'),
-    s_id,
-    'student',
-    is_edu_domain,
-    COALESCE((NEW.raw_user_meta_data->>'must_change_password')::boolean, true)
-  )
-  ON CONFLICT (id) DO UPDATE SET
-    username = EXCLUDED.username,
-    department = COALESCE(public.profiles.department, EXCLUDED.department),
-    year = COALESCE(public.profiles.year, EXCLUDED.year),
-    student_id = COALESCE(public.profiles.student_id, EXCLUDED.student_id);
-
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
-DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
-CREATE TRIGGER on_auth_user_created
-  AFTER INSERT ON auth.users
-  FOR EACH ROW
-  EXECUTE FUNCTION public.handle_new_user();
-
 -- ============================================================================
 -- STORED PROCEDURES / SECURE RPCs
--- ============================================================================
+-- ===============================================================================
 
 -- MEMBERSHIP APPROVAL RPC
 CREATE OR REPLACE FUNCTION public.approve_club_membership(p_membership_id UUID)
@@ -739,26 +817,28 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- FIRST TIME PASSWORD CHANGE COMPLETION RPC
-CREATE OR REPLACE FUNCTION public.complete_first_time_password_change()
-RETURNS JSONB AS $$
-DECLARE
-  v_user_id UUID := auth.uid();
+-- TRUSTED SERVER-SIDE PASSWORD CHANGE TRIGGER (TAMPER-PROOF)
+-- Automatically fires when auth.users.encrypted_password changes in Supabase Auth.
+-- Clients never directly clear must_change_password; it only clears upon actual password update.
+CREATE OR REPLACE FUNCTION public.on_auth_user_password_changed()
+RETURNS TRIGGER AS $$
 BEGIN
-  IF v_user_id IS NULL THEN
-    RAISE EXCEPTION 'Not authenticated';
+  IF (OLD.encrypted_password IS DISTINCT FROM NEW.encrypted_password) THEN
+    PERFORM set_config('campus.in_password_change', 'true', true);
+    UPDATE public.profiles
+    SET must_change_password = false,
+        updated_at = now()
+    WHERE id = NEW.id;
   END IF;
-
-  PERFORM set_config('campus.in_password_change', 'true', true);
-
-  UPDATE public.profiles
-  SET must_change_password = false,
-      updated_at = now()
-  WHERE id = v_user_id;
-
-  RETURN jsonb_build_object('success', true, 'message', 'Password change completed successfully');
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trg_auth_user_password_changed ON auth.users;
+CREATE TRIGGER trg_auth_user_password_changed
+  AFTER UPDATE OF encrypted_password ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.on_auth_user_password_changed();
 
 -- ============================================================================
 -- STRICT ROW LEVEL SECURITY (RLS) POLICIES
@@ -878,7 +958,15 @@ CREATE POLICY "View active memberships or own request" ON public.club_membership
 CREATE POLICY "Request club membership" ON public.club_memberships
   FOR INSERT TO authenticated
   WITH CHECK (
-    auth.uid() = user_id
+    auth.uid() = user_id AND
+    role = 'member' AND
+    status = 'pending'
+  );
+
+CREATE POLICY "Admins insert membership" ON public.club_memberships
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
   );
 
 CREATE POLICY "Organizers or admins update membership" ON public.club_memberships
@@ -1000,6 +1088,223 @@ CREATE POLICY "Users update own notifications" ON public.notifications
   USING (auth.uid() = user_id)
   WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "Authorized system inserts notifications" ON public.notifications
+CREATE POLICY "Admins insert notifications" ON public.notifications
   FOR INSERT TO authenticated
-  WITH CHECK (true);
+  WITH CHECK (
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+  );
+
+-- ============================================================================
+-- STORAGE BUCKETS INITIALIZATION AND STRICT RLS POLICIES
+-- ============================================================================
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'avatars', 
+  'avatars', 
+  true, 
+  5242880,
+  ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+)
+ON CONFLICT (id) DO UPDATE SET 
+  public = true,
+  file_size_limit = 5242880,
+  allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'posts', 
+  'posts', 
+  true, 
+  20971520,
+  ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/quicktime']
+)
+ON CONFLICT (id) DO UPDATE SET 
+  public = true,
+  file_size_limit = 20971520,
+  allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/quicktime'];
+
+-- AVATARS STORAGE POLICIES
+DROP POLICY IF EXISTS "Public can view avatars" ON storage.objects;
+CREATE POLICY "Public can view avatars" ON storage.objects
+  FOR SELECT USING (bucket_id = 'avatars');
+
+DROP POLICY IF EXISTS "Users upload own avatar" ON storage.objects;
+CREATE POLICY "Users upload own avatar" ON storage.objects
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'avatars' AND
+    (storage.foldername(name))[1] = auth.uid()::text AND
+    LOWER(storage.extension(name)) IN ('jpg', 'jpeg', 'png', 'webp', 'gif')
+  );
+
+DROP POLICY IF EXISTS "Users update own avatar" ON storage.objects;
+CREATE POLICY "Users update own avatar" ON storage.objects
+  FOR UPDATE TO authenticated
+  USING (
+    bucket_id = 'avatars' AND
+    (storage.foldername(name))[1] = auth.uid()::text
+  )
+  WITH CHECK (
+    bucket_id = 'avatars' AND
+    (storage.foldername(name))[1] = auth.uid()::text AND
+    LOWER(storage.extension(name)) IN ('jpg', 'jpeg', 'png', 'webp', 'gif')
+  );
+
+DROP POLICY IF EXISTS "Users delete own avatar" ON storage.objects;
+CREATE POLICY "Users delete own avatar" ON storage.objects
+  FOR DELETE TO authenticated
+  USING (
+    bucket_id = 'avatars' AND
+    (
+      (storage.foldername(name))[1] = auth.uid()::text OR
+      EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    )
+  );
+
+-- POST MEDIA STORAGE POLICIES
+DROP POLICY IF EXISTS "Public can view posts" ON storage.objects;
+CREATE POLICY "Public can view posts" ON storage.objects
+  FOR SELECT USING (bucket_id = 'posts');
+
+DROP POLICY IF EXISTS "Users upload own post media" ON storage.objects;
+CREATE POLICY "Users upload own post media" ON storage.objects
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'posts' AND
+    (storage.foldername(name))[1] = auth.uid()::text AND
+    LOWER(storage.extension(name)) IN ('jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4', 'mov')
+  );
+
+DROP POLICY IF EXISTS "Users update own post media" ON storage.objects;
+CREATE POLICY "Users update own post media" ON storage.objects
+  FOR UPDATE TO authenticated
+  USING (
+    bucket_id = 'posts' AND
+    (storage.foldername(name))[1] = auth.uid()::text
+  )
+  WITH CHECK (
+    bucket_id = 'posts' AND
+    (storage.foldername(name))[1] = auth.uid()::text AND
+    LOWER(storage.extension(name)) IN ('jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4', 'mov')
+  );
+
+DROP POLICY IF EXISTS "Users delete own post media" ON storage.objects;
+CREATE POLICY "Users delete own post media" ON storage.objects
+  FOR DELETE TO authenticated
+  USING (
+    bucket_id = 'posts' AND
+    (
+      (storage.foldername(name))[1] = auth.uid()::text OR
+      EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    )
+  );
+
+-- ============================================================================
+-- MESSAGE READ STATE, NARROW UPDATE PRIVILEGES, & IMMUTABILITY
+-- ============================================================================
+
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_messages_convo_read ON public.messages(conversation_id, sender_id, is_read);
+
+REVOKE UPDATE ON public.messages FROM authenticated;
+GRANT UPDATE (is_read, read_at) ON public.messages TO authenticated;
+
+DROP POLICY IF EXISTS "Users can mark messages as read" ON public.messages;
+CREATE POLICY "Users can mark messages as read" ON public.messages
+  FOR UPDATE TO authenticated
+  USING (
+    sender_id != auth.uid() AND
+    EXISTS (
+      SELECT 1 FROM public.conversations c
+      WHERE c.id = conversation_id
+      AND (c.user1_id = auth.uid() OR c.user2_id = auth.uid())
+    )
+  )
+  WITH CHECK (
+    sender_id != auth.uid() AND
+    EXISTS (
+      SELECT 1 FROM public.conversations c
+      WHERE c.id = conversation_id
+      AND (c.user1_id = auth.uid() OR c.user2_id = auth.uid())
+    )
+  );
+
+CREATE OR REPLACE FUNCTION public.protect_message_immutability()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.content IS DISTINCT FROM OLD.content OR
+     NEW.sender_id IS DISTINCT FROM OLD.sender_id OR
+     NEW.conversation_id IS DISTINCT FROM OLD.conversation_id OR
+     NEW.created_at IS DISTINCT FROM OLD.created_at OR
+     NEW.id IS DISTINCT FROM OLD.id THEN
+    RAISE EXCEPTION 'Unauthorized: Message content and metadata are immutable. Only read status can be updated.';
+  END IF;
+
+  IF auth.uid() IS NOT NULL AND auth.role() = 'authenticated' AND NEW.sender_id = auth.uid() THEN
+    IF NEW.is_read IS DISTINCT FROM OLD.is_read OR NEW.read_at IS DISTINCT FROM OLD.read_at THEN
+      RAISE EXCEPTION 'Unauthorized: Only recipients can mark messages as read.';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trg_protect_message_immutability ON public.messages;
+CREATE TRIGGER trg_protect_message_immutability
+  BEFORE UPDATE ON public.messages
+  FOR EACH ROW
+  EXECUTE FUNCTION public.protect_message_immutability();
+
+CREATE OR REPLACE FUNCTION public.mark_messages_read(p_conversation_id UUID)
+RETURNS INT AS $$
+DECLARE
+  v_user_id UUID := auth.uid();
+  v_updated_count INT;
+BEGIN
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM public.conversations
+    WHERE id = p_conversation_id AND (user1_id = v_user_id OR user2_id = v_user_id)
+  ) THEN
+    RAISE EXCEPTION 'Unauthorized: Caller is not a participant in this conversation';
+  END IF;
+
+  UPDATE public.messages
+  SET is_read = true, read_at = NOW()
+  WHERE conversation_id = p_conversation_id
+    AND sender_id != v_user_id
+    AND is_read = false;
+
+  GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+  RETURN v_updated_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION public.get_unread_messages_count()
+RETURNS INT AS $$
+DECLARE
+  v_user_id UUID := auth.uid();
+  v_count INT := 0;
+BEGIN
+  IF v_user_id IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  SELECT COUNT(*) INTO v_count
+  FROM public.messages m
+  JOIN public.conversations c ON c.id = m.conversation_id
+  WHERE (c.user1_id = v_user_id OR c.user2_id = v_user_id)
+    AND m.sender_id != v_user_id
+    AND m.is_read = false;
+
+  RETURN v_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+
+

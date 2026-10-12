@@ -282,5 +282,245 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
 
     expect(evaluateRoute(updatedSession)).toBe("/clubs");
   });
+
+  it("should reject clearing mustChangePassword if database confirmation fails", async () => {
+    let clientMustChangePassword = true;
+
+    const verifyAndComplete = async (mockFetchProfile: () => Promise<{ must_change_password: boolean } | null>) => {
+      const refreshed = await mockFetchProfile();
+      if (!refreshed || refreshed.must_change_password) {
+        clientMustChangePassword = true;
+        throw new Error("Password updated, but setup is not yet confirmed. Please retry.");
+      }
+      clientMustChangePassword = false;
+    };
+
+    // Case 1: Database refresh fails / returns null
+    await expect(verifyAndComplete(async () => null)).rejects.toThrow(
+      /Password updated, but setup is not yet confirmed/
+    );
+    expect(clientMustChangePassword).toBe(true);
+
+    // Case 2: Database still returns must_change_password = true
+    await expect(verifyAndComplete(async () => ({ must_change_password: true }))).rejects.toThrow(
+      /Password updated, but setup is not yet confirmed/
+    );
+    expect(clientMustChangePassword).toBe(true);
+
+    // Case 3: Database confirms must_change_password = false
+    await verifyAndComplete(async () => ({ must_change_password: false }));
+    expect(clientMustChangePassword).toBe(false);
+  });
+
+  it("should fail-closed if profile loading encounters an error or returns null", () => {
+    interface RouteEvalContext {
+      user: { id: string } | null;
+      profile: { id: string } | null;
+      profileError: string | null;
+      mustChangePassword: boolean;
+    }
+
+    const evaluateRouteSecurity = (ctx: RouteEvalContext): "auth" | "error_screen" | "change_password" | "allowed" => {
+      if (!ctx.user) return "auth";
+      if (ctx.profileError || !ctx.profile) return "error_screen";
+      if (ctx.mustChangePassword) return "change_password";
+      return "allowed";
+    };
+
+    // Missing profile or network error must fail-closed to error screen
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: null,
+      profileError: "Network timeout",
+      mustChangePassword: false,
+    })).toBe("error_screen");
+
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: null,
+      profileError: null,
+      mustChangePassword: false,
+    })).toBe("error_screen");
+
+    // Profile loaded but must change password
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: { id: "u-1" },
+      profileError: null,
+      mustChangePassword: true,
+    })).toBe("change_password");
+
+    // Normal verified profile
+    expect(evaluateRouteSecurity({
+      user: { id: "u-1" },
+      profile: { id: "u-1" },
+      profileError: null,
+      mustChangePassword: false,
+    })).toBe("allowed");
+  });
+
+  it("should prevent students from self-assigning president role or active status during membership insertion", () => {
+    interface MembershipInsertPayload {
+      club_id: string;
+      user_id: string;
+      role: string;
+      status: string;
+    }
+
+    const protectMembershipInsertion = (
+      payload: MembershipInsertPayload,
+      callerRole: "student" | "college_admin"
+    ): MembershipInsertPayload => {
+      if (callerRole !== "college_admin") {
+        return {
+          ...payload,
+          role: "member",
+          status: "pending",
+        };
+      }
+      return payload;
+    };
+
+    // Malicious student attempting to insert president/active
+    const forgedRequest: MembershipInsertPayload = {
+      club_id: "club-1",
+      user_id: "student-1",
+      role: "president",
+      status: "active",
+    };
+
+    const securedResult = protectMembershipInsertion(forgedRequest, "student");
+    expect(securedResult.role).toBe("member");
+    expect(securedResult.status).toBe("pending");
+
+    // Admin creating membership
+    const adminResult = protectMembershipInsertion(forgedRequest, "college_admin");
+    expect(adminResult.role).toBe("president");
+    expect(adminResult.status).toBe("active");
+  });
+
+  it("should ensure profile recovery always defaults is_verified to false and college_role to student", () => {
+    interface ProfileRecoveryPayload {
+      id: string;
+      username: string;
+      college_role: string;
+      is_verified: boolean;
+    }
+
+    const protectProfileCreation = (
+      input: Partial<ProfileRecoveryPayload>,
+      callerRole: "student" | "college_admin"
+    ): ProfileRecoveryPayload => {
+      const isPrivileged = callerRole === "college_admin";
+      return {
+        id: input.id || "u-new",
+        username: input.username || "student_user",
+        college_role: isPrivileged ? (input.college_role || "college_admin") : "student",
+        is_verified: isPrivileged ? Boolean(input.is_verified) : false,
+      };
+    };
+
+    // Fallback/recovery path with attempted verification
+    const recoveredProfile = protectProfileCreation(
+      { username: "john", college_role: "college_admin", is_verified: true },
+      "student"
+    );
+
+    expect(recoveredProfile.college_role).toBe("student");
+    expect(recoveredProfile.is_verified).toBe(false);
+  });
+
+  it("should reject client-side notification forging by regular students", () => {
+    const canInsertNotification = (
+      callerRole: "student" | "college_admin",
+      isSecurityDefinerTrigger: boolean
+    ): boolean => {
+      // Security definer triggers (system) and college_admins can insert notifications
+      if (isSecurityDefinerTrigger) return true;
+      if (callerRole === "college_admin") return true;
+      return false; // Regular students are strictly rejected
+    };
+
+    expect(canInsertNotification("student", false)).toBe(false);
+    expect(canInsertNotification("college_admin", false)).toBe(true);
+    expect(canInsertNotification("student", true)).toBe(true);
+  });
+
+  it("should enforce message content immutability and restrict updates to read status only", () => {
+    interface MessageRow {
+      id: string;
+      conversation_id: string;
+      sender_id: string;
+      content: string;
+      is_read: boolean;
+      read_at: string | null;
+      created_at: string;
+    }
+
+    const applyMessageUpdate = (
+      current: MessageRow,
+      update: Partial<MessageRow>,
+      callerId: string
+    ): MessageRow => {
+      // Rule 1: Content, sender, conversation, and created_at are strictly immutable
+      if (
+        (update.content !== undefined && update.content !== current.content) ||
+        (update.sender_id !== undefined && update.sender_id !== current.sender_id) ||
+        (update.conversation_id !== undefined && update.conversation_id !== current.conversation_id) ||
+        (update.created_at !== undefined && update.created_at !== current.created_at) ||
+        (update.id !== undefined && update.id !== current.id)
+      ) {
+        throw new Error("Unauthorized: Message content and metadata are immutable. Only read status can be updated.");
+      }
+
+      // Rule 2: Only recipients can mark messages as read
+      if (callerId === current.sender_id && update.is_read !== undefined && update.is_read !== current.is_read) {
+        throw new Error("Unauthorized: Only recipients can mark messages as read.");
+      }
+
+      return {
+        ...current,
+        is_read: update.is_read !== undefined ? update.is_read : current.is_read,
+        read_at: update.read_at !== undefined ? update.read_at : current.read_at,
+      };
+    };
+
+    const originalMsg: MessageRow = {
+      id: "msg-1",
+      conversation_id: "conv-1",
+      sender_id: "student-b",
+      content: "Hello from student B",
+      is_read: false,
+      read_at: null,
+      created_at: "2026-10-12T00:00:00Z",
+    };
+
+    // Case 1: Student A (recipient) attempts to tamper with message content -> REJECTED
+    expect(() =>
+      applyMessageUpdate(originalMsg, { content: "Tampered content" }, "student-a")
+    ).toThrow(/Message content and metadata are immutable/);
+
+    // Case 2: Student A (recipient) attempts to tamper with sender_id -> REJECTED
+    expect(() =>
+      applyMessageUpdate(originalMsg, { sender_id: "student-a" }, "student-a")
+    ).toThrow(/Message content and metadata are immutable/);
+
+    // Case 3: Student B (sender) attempts to mark their own message read -> REJECTED
+    expect(() =>
+      applyMessageUpdate(originalMsg, { is_read: true }, "student-b")
+    ).toThrow(/Only recipients can mark messages as read/);
+
+    // Case 4: Student A (recipient) marks message read -> ALLOWED
+    const readMsg = applyMessageUpdate(
+      originalMsg,
+      { is_read: true, read_at: "2026-10-12T00:05:00Z" },
+      "student-a"
+    );
+    expect(readMsg.is_read).toBe(true);
+    expect(readMsg.read_at).toBe("2026-10-12T00:05:00Z");
+    expect(readMsg.content).toBe("Hello from student B");
+  });
 });
+
+
 

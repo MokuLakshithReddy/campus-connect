@@ -5,8 +5,16 @@
  */
 const https = require('https');
 
-const SUPABASE_PROJECT_URL = 'gtkvujspajcelzufpggr.supabase.co';
-const SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0a3Z1anNwYWpjZWx6dWZwZ2dyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MzM1OTY4NywiZXhwIjoyMDk4OTM1Njg3fQ.QU6cAcdrSR8o5yHgoecgdDrkh3gv4hA8a7KVGaLoldM';
+const SUPABASE_PROJECT_URL = process.env.VITE_SUPABASE_URL
+  ? process.env.VITE_SUPABASE_URL.replace(/^https?:\/\//, '')
+  : 'gtkvujspajcelzufpggr.supabase.co';
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SERVICE_ROLE_KEY) {
+  console.error("ERROR: SUPABASE_SERVICE_ROLE_KEY environment variable is required.");
+  console.error("Usage: SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER>");
+  process.exit(1);
+}
 
 const rollNumber = (process.argv[2] || '24CS0142').trim().toUpperCase();
 const department = process.argv[3] || 'Computer Science & Engineering';
@@ -49,10 +57,43 @@ const options = {
 const req = https.request(options, (res) => {
   let body = '';
   res.on('data', chunk => body += chunk);
-  res.on('end', () => {
+  res.on('end', async () => {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       const user = JSON.parse(body);
-      console.log(`✅ Successfully provisioned ${rollNumber} (User ID: ${user.id})`);
+      console.log(`✅ Successfully provisioned ${rollNumber} in auth.users (User ID: ${user.id})`);
+
+      // Verify the profile row in public.profiles table
+      const profileReq = https.request({
+        hostname: SUPABASE_PROJECT_URL,
+        path: `/rest/v1/profiles?id=eq.${user.id}&select=*`,
+        method: 'GET',
+        headers: {
+          'apikey': SERVICE_ROLE_KEY,
+          'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+        }
+      }, (profRes) => {
+        let profBody = '';
+        profRes.on('data', c => profBody += c);
+        profRes.on('end', () => {
+          try {
+            const profiles = JSON.parse(profBody);
+            const prof = profiles[0];
+            if (prof) {
+              console.log(`✅ Verified public.profiles row:`);
+              console.log(`   - Username: ${prof.username}`);
+              console.log(`   - Student ID: ${prof.student_id}`);
+              console.log(`   - College Role: ${prof.college_role}`);
+              console.log(`   - Must Change Password: ${prof.must_change_password}`);
+              console.log(`   - Is Verified: ${prof.is_verified}`);
+            } else {
+              console.warn(`⚠️ Profile row not found for user ${user.id}`);
+            }
+          } catch(e) {
+            console.error('Error verifying profile:', e);
+          }
+        });
+      });
+      profileReq.end();
     } else {
       console.error(`❌ Failed with status ${res.statusCode}:`, body);
     }

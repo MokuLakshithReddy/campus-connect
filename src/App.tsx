@@ -20,12 +20,13 @@ import Chats from "./pages/Chats";
 import ChatConversation from "./pages/ChatConversation";
 import NotFound from "./pages/NotFound";
 import ReleaseUpdateDialog from "@/components/ReleaseUpdateDialog";
+import AuthErrorScreen from "@/components/AuthErrorScreen";
 
 const queryClient = new QueryClient();
 
-// Protected Route Guard: Strictly forces password change if mustChangePassword is true
+// Protected Route Guard: Strictly forces password change and verifies profile presence
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading, mustChangePassword } = useAuth();
+  const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -34,13 +35,23 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (!user) return <Navigate to="/auth" replace />;
+  if (profileError || !profile) {
+    return (
+      <AuthErrorScreen
+        error={profileError || "Account profile record could not be loaded."}
+        onRetry={refreshProfile}
+        onSignOut={signOut}
+        isLoading={loading}
+      />
+    );
+  }
   if (mustChangePassword) return <Navigate to="/change-password" replace />;
   return <>{children}</>;
 };
 
-// Authenticated users may open this screen for either first-time setup or a voluntary update.
-const ChangePasswordRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading } = useAuth();
+// Guard for the Mandatory Change Password screen
+const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) => {
+  const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -49,12 +60,24 @@ const ChangePasswordRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (!user) return <Navigate to="/auth" replace />;
+  if (profileError || !profile) {
+    return (
+      <AuthErrorScreen
+        error={profileError || "Account profile record could not be loaded."}
+        onRetry={refreshProfile}
+        onSignOut={signOut}
+        isLoading={loading}
+      />
+    );
+  }
+  // If already changed password, do not allow staying on change password screen
+  if (!mustChangePassword) return <Navigate to="/" replace />;
   return <>{children}</>;
 };
 
 // Unauthenticated Route Guard
 const AuthRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading, mustChangePassword } = useAuth();
+  const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
@@ -63,6 +86,16 @@ const AuthRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (user) {
+    if (profileError || !profile) {
+      return (
+        <AuthErrorScreen
+          error={profileError || "Account profile record could not be loaded."}
+          onRetry={refreshProfile}
+          onSignOut={signOut}
+          isLoading={loading}
+        />
+      );
+    }
     if (mustChangePassword) return <Navigate to="/change-password" replace />;
     return <Navigate to="/" replace />;
   }
@@ -79,7 +112,7 @@ const App = () => (
           <ReleaseUpdateDialog />
           <Routes>
             <Route path="/auth" element={<AuthRoute><Auth /></AuthRoute>} />
-            <Route path="/change-password" element={<ChangePasswordRoute><ChangePassword /></ChangePasswordRoute>} />
+            <Route path="/change-password" element={<ForcePasswordChangeRoute><ChangePassword /></ForcePasswordChangeRoute>} />
             <Route path="/" element={<ProtectedRoute><Index /></ProtectedRoute>} />
             <Route path="/clubs" element={<ProtectedRoute><Clubs /></ProtectedRoute>} />
             <Route path="/club/:clubId" element={<ProtectedRoute><ClubWorkspace /></ProtectedRoute>} />

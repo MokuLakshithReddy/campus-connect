@@ -199,31 +199,21 @@ const ClubWorkspace = () => {
 
       if (evData) {
         const rawEvents = evData as unknown as CampusEvent[];
-        const eventIds = rawEvents.map((ev) => ev.id);
-        const registrationCounts = new Map<string, number>();
-        if (eventIds.length > 0) {
-          const { data: statsData, error: statsError } = await supabase.rpc("get_event_registration_stats", {
-            p_event_ids: eventIds,
-          });
-          if (statsError) throw statsError;
-          for (const stat of statsData || []) {
-            registrationCounts.set(stat.event_id, Number(stat.registration_count));
-          }
+        let myRegs: EventRegistration[] = [];
+        if (user?.id) {
+          const { data: regData } = await supabase
+            .from("event_registrations")
+            .select("event_id, user_id, status")
+            .eq("user_id", user.id);
+          myRegs = (regData || []) as unknown as EventRegistration[];
         }
 
-        const { data: regData, error: regError } = await supabase
-          .from("event_registrations")
-          .select("event_id, user_id, status")
-          .eq("user_id", user?.id || "");
-        if (regError) throw regError;
-
-        const regs = (regData || []) as unknown as EventRegistration[];
         const enrichedEvents: EventWithMeta[] = rawEvents.map((ev) => {
-          const userReg = regs.some((r) => r.event_id === ev.id && r.user_id === user?.id && r.status === "registered");
+          const isUserReg = myRegs.some((r) => r.event_id === ev.id && r.status === "registered");
           return {
             ...ev,
-            registration_count: registrationCounts.get(ev.id) || 0,
-            is_registered: userReg,
+            registration_count: ev.registered_count ?? 0,
+            is_registered: isUserReg,
           };
         });
         setEvents(enrichedEvents);
