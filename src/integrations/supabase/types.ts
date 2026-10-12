@@ -595,6 +595,7 @@ export type Database = {
           id: string
           image_url: string
           user_id: string
+          branch_id: string | null
         }
         Insert: {
           caption?: string | null
@@ -602,6 +603,7 @@ export type Database = {
           id?: string
           image_url: string
           user_id: string
+          branch_id?: string | null
         }
         Update: {
           caption?: string | null
@@ -609,11 +611,135 @@ export type Database = {
           id?: string
           image_url?: string
           user_id?: string
+          branch_id?: string | null
         }
         Relationships: [
           {
             foreignKeyName: "posts_user_id_fkey"
             columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "posts_branch_id_fkey"
+            columns: ["branch_id"]
+            isOneToOne: false
+            referencedRelation: "academic_branches"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
+      academic_branches: {
+        Row: {
+          id: string
+          course: string
+          branch_code: string
+          display_name: string
+          total_strength: number
+          is_active: boolean
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          course: string
+          branch_code: string
+          display_name: string
+          total_strength?: number
+          is_active?: boolean
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          course?: string
+          branch_code?: string
+          display_name?: string
+          total_strength?: number
+          is_active?: boolean
+          created_at?: string
+        }
+        Relationships: []
+      }
+      academic_branch_prefixes: {
+        Row: {
+          id: string
+          prefix: string
+          branch_id: string
+          admission_year: number
+          is_active: boolean
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          prefix: string
+          branch_id: string
+          admission_year: number
+          is_active?: boolean
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          prefix?: string
+          branch_id?: string
+          admission_year?: number
+          is_active?: boolean
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "academic_branch_prefixes_branch_id_fkey"
+            columns: ["branch_id"]
+            isOneToOne: false
+            referencedRelation: "academic_branches"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
+      student_directory: {
+        Row: {
+          id: string
+          roll_number: string
+          full_name: string
+          branch_id: string
+          admission_year: number
+          profile_id: string | null
+          is_active: boolean
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          roll_number: string
+          full_name: string
+          branch_id: string
+          admission_year: number
+          profile_id?: string | null
+          is_active?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          roll_number?: string
+          full_name?: string
+          branch_id?: string
+          admission_year?: number
+          profile_id?: string | null
+          is_active?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "student_directory_branch_id_fkey"
+            columns: ["branch_id"]
+            isOneToOne: false
+            referencedRelation: "academic_branches"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "student_directory_profile_id_fkey"
+            columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["id"]
@@ -697,6 +823,27 @@ export type Database = {
           p_roll_number: string
         }
         Returns: Json
+      }
+      sync_authenticated_student_directory: {
+        Args: Record<PropertyKey, never>
+        Returns: Json
+      }
+      search_campus_students: {
+        Args: {
+          p_query?: string
+          p_branch_id?: string | null
+          p_limit?: number
+        }
+        Returns: {
+          id: string
+          username: string
+          avatar_url: string | null
+          department: string | null
+          student_id: string | null
+          branch_id: string | null
+          course: string | null
+          branch_code: string | null
+        }[]
       }
     }
     Enums: {

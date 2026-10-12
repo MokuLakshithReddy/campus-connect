@@ -138,7 +138,29 @@ describe("Academic Protection & Authorization Triggers", () => {
       )
     ).toThrowError("Unauthorized: Student roll number cannot be modified");
 
-    // 3. Admin can update records
+    // 3. Student attempts to self-escalate college_role to college_admin
+    const executeRoleProtection = (
+      oldRow: ProfileRecord,
+      newRow: ProfileRecord,
+      callerRole: string
+    ) => {
+      if (callerRole !== "college_admin") {
+        if (newRow.college_role !== oldRow.college_role) {
+          throw new Error("Unauthorized: Cannot modify college_role");
+        }
+      }
+      return newRow;
+    };
+
+    expect(() =>
+      executeRoleProtection(
+        currentProfile,
+        { ...currentProfile, college_role: "college_admin" },
+        "student"
+      )
+    ).toThrowError("Unauthorized: Cannot modify college_role");
+
+    // 4. Admin can update records
     const adminUpdated = executeProfileUpdate(
       currentProfile,
       { ...currentProfile, branch_id: "branch-cse-uuid" },
@@ -146,6 +168,108 @@ describe("Academic Protection & Authorization Triggers", () => {
       "college_admin"
     );
     expect(adminUpdated.branch_id).toBe("branch-cse-uuid");
+  });
+
+  it("enforces literal prefix matching without SQL pattern wildcard injection (_ or %)", () => {
+    // Literal matching rule: left(roll_number, length(prefix)) = prefix
+    const literalMatchPrefix = (roll: string, prefix: string) => {
+      const cleanRoll = roll.trim().toUpperCase();
+      const cleanPrefix = prefix.trim().toUpperCase();
+      return cleanRoll.slice(0, cleanPrefix.length) === cleanPrefix;
+    };
+
+    // A roll number containing an underscore or percent must NOT match a wildcard pattern
+    expect(literalMatchPrefix("25MVCSMR0001", "25MVCSMR")).toBe(true);
+    expect(literalMatchPrefix("25MVCSMR0001", "25MVCS%")).toBe(false);
+    expect(literalMatchPrefix("25MVCSMR0001", "25MVCS_R")).toBe(false);
+    expect(literalMatchPrefix("25MVCS_R0001", "25MVCS_R")).toBe(true);
+  });
+
+  it("resolves overlapping prefixes deterministically via longest-prefix precedence", () => {
+    interface PrefixRule {
+      prefix: string;
+      branchCode: string;
+    }
+
+    const rules: PrefixRule[] = [
+      { prefix: "25MV", branchCode: "GENERAL" },
+      { prefix: "25MVCSMR", branchCode: "CSE-AIML" },
+      { prefix: "25MVCS", branchCode: "CSE-GROUP" },
+    ];
+
+    // Enforce PostgreSQL rule: ORDER BY length(prefix) DESC, prefix ASC LIMIT 1
+    const resolveLongestPrefix = (roll: string, prefixRules: PrefixRule[]): PrefixRule | null => {
+      const matches = prefixRules
+        .filter((r) => roll.startsWith(r.prefix))
+        .sort((a, b) => b.prefix.length - a.prefix.length || a.prefix.localeCompare(b.prefix));
+      return matches[0] || null;
+    };
+
+    const result = resolveLongestPrefix("25MVCSMR0001", rules);
+    expect(result).not.toBeNull();
+    expect(result?.prefix).toBe("25MVCSMR");
+    expect(result?.branchCode).toBe("CSE-AIML");
+  });
+
+  it("enforces strict directory RLS isolation: students can only read own enrollment record", () => {
+    interface DirectoryRecord {
+      id: string;
+      roll_number: string;
+      profile_id: string | null;
+      is_active: boolean;
+    }
+
+    const directoryRecords: DirectoryRecord[] = [
+      { id: "dir-1", roll_number: "25MVCSMR0001", profile_id: "user-alice", is_active: true },
+      { id: "dir-2", roll_number: "25MVCSER0002", profile_id: "user-bob", is_active: true },
+    ];
+
+    // PostgreSQL RLS policy on student_directory:
+    // profile_id = auth.uid() OR college_admin
+    const queryDirectoryAsUser = (callerId: string, callerRole: string) => {
+      return directoryRecords.filter((row) => {
+        if (callerRole === "college_admin") return true;
+        return row.profile_id === callerId;
+      });
+    };
+
+    const aliceRows = queryDirectoryAsUser("user-alice", "student");
+    expect(aliceRows.length).toBe(1);
+    expect(aliceRows[0].roll_number).toBe("25MVCSMR0001");
+
+    // Intruding student cannot dump peer directory records
+    const eveRows = queryDirectoryAsUser("user-eve", "student");
+    expect(eveRows.length).toBe(0);
+
+    // College admin can view all records for provisioning
+    const adminRows = queryDirectoryAsUser("user-admin", "college_admin");
+    expect(adminRows.length).toBe(2);
+  });
+
+  it("rejects directory sync when directory entry is marked inactive", () => {
+    interface StudentDirectoryRow {
+      roll_number: string;
+      profile_id: string | null;
+      is_active: boolean;
+    }
+
+    const directoryRow: StudentDirectoryRow = {
+      roll_number: "25MVCSMR0099",
+      profile_id: null,
+      is_active: false, // Suspended / inactive student
+    };
+
+    const syncStudent = (row: StudentDirectoryRow, authUserId: string) => {
+      if (!row.is_active) {
+        throw new Error("Student directory record is inactive or suspended");
+      }
+      row.profile_id = authUserId;
+      return row;
+    };
+
+    expect(() => syncStudent(directoryRow, "user-inactive")).toThrowError(
+      "Student directory record is inactive or suspended"
+    );
   });
 
   it("denies access when a user attempts to read another student's private messages", () => {

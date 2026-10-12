@@ -25,7 +25,6 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { findBranchForRollNumber, BRANCH_CONFIGS } from "@/lib/academic-branches";
 
 interface UpcomingEvent {
   id: string;
@@ -65,46 +64,104 @@ const Index = () => {
   const [announcements, setAnnouncements] = useState<AnnouncementNotice[]>([]);
   const [featuredClubs, setFeaturedClubs] = useState<FeaturedClub[]>([]);
   const [selectedCategory, setSelectedCategory] = useState("All");
-  const [feedScope, setFeedScope] = useState<"branch" | "college">("branch");
+  // Default to branch scope ONLY if student has a verified branch_id; otherwise safely fall back to college-wide
+  const [feedScope, setFeedScope] = useState<"branch" | "college">(() => (profile?.branch_id ? "branch" : "college"));
+  const [verifiedBranch, setVerifiedBranch] = useState<{ course: string; branch_code: string; display_name: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [feedError, setFeedError] = useState<string | null>(null);
 
-  // Authoritative student branch resolution
-  const studentBranch = findBranchForRollNumber(profile?.student_id || "") ||
-    BRANCH_CONFIGS.find((b) => profile?.department?.toLowerCase().includes(b.branchCode.toLowerCase()));
+  // Authoritatively load verified academic branch info from database using profile.branch_id
+  useEffect(() => {
+    if (profile?.branch_id) {
+      supabase
+        .from("academic_branches")
+        .select("course, branch_code, display_name")
+        .eq("id", profile.branch_id)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) setVerifiedBranch(data);
+        });
+    } else {
+      setVerifiedBranch(null);
+      // Fallback safely to college-wide if user's branch is not linked/unknown
+      setFeedScope("college");
+    }
+  }, [profile?.branch_id]);
 
   const loadCampusFeed = useCallback(async () => {
     try {
       setLoading(true);
       setFeedError(null);
 
-      // 1. Fetch Featured Active Clubs
-      const { data: clubsData, error: clubsErr } = await supabase
-        .from("clubs")
-        .select("id, name, description, category, status")
-        .eq("status", "active")
-        .limit(6);
+      const isBranchFilterActive = feedScope === "branch" && Boolean(profile?.branch_id);
 
-      if (clubsErr) throw clubsErr;
-      setFeaturedClubs((clubsData || []) as FeaturedClub[]);
+      // 1. Fetch Featured Active Clubs (filtered by creator branch if branch scope active)
+      let clubsData: any[] = [];
+      if (isBranchFilterActive && profile?.branch_id) {
+        const { data, error } = await supabase
+          .from("clubs")
+          .select("id, name, description, category, status, profiles!created_by(branch_id)")
+          .eq("status", "active")
+          .eq("profiles.branch_id", profile.branch_id)
+          .limit(6);
+        if (error) throw error;
+        clubsData = data || [];
+      } else {
+        const { data, error } = await supabase
+          .from("clubs")
+          .select("id, name, description, category, status")
+          .eq("status", "active")
+          .limit(6);
+        if (error) throw error;
+        clubsData = data || [];
+      }
+      setFeaturedClubs(clubsData.map((c) => ({
+        id: c.id,
+        name: c.name,
+        description: c.description,
+        category: c.category,
+        status: c.status,
+      })));
 
-      // 2. Fetch Upcoming Campus Events
-      const { data: evData, error: evErr } = await supabase
-        .from("events")
-        .select(`
-          id,
-          club_id,
-          title,
-          venue,
-          start_time,
-          capacity,
-          clubs:club_id (name)
-        `)
-        .eq("is_published", true)
-        .order("start_time", { ascending: true })
-        .limit(4);
-
-      if (evErr) throw evErr;
+      // 2. Fetch Upcoming Campus Events (filtered by organizer branch if branch scope active)
+      let rawEvents: any[] = [];
+      if (isBranchFilterActive && profile?.branch_id) {
+        const { data, error } = await supabase
+          .from("events")
+          .select(`
+            id,
+            club_id,
+            title,
+            venue,
+            start_time,
+            capacity,
+            clubs:club_id (name),
+            profiles!created_by (branch_id)
+          `)
+          .eq("is_published", true)
+          .eq("profiles.branch_id", profile.branch_id)
+          .order("start_time", { ascending: true })
+          .limit(4);
+        if (error) throw error;
+        rawEvents = data || [];
+      } else {
+        const { data, error } = await supabase
+          .from("events")
+          .select(`
+            id,
+            club_id,
+            title,
+            venue,
+            start_time,
+            capacity,
+            clubs:club_id (name)
+          `)
+          .eq("is_published", true)
+          .order("start_time", { ascending: true })
+          .limit(4);
+        if (error) throw error;
+        rawEvents = data || [];
+      }
 
       let registeredIds = new Set<string>();
       if (user?.id) {
@@ -120,7 +177,6 @@ const Index = () => {
         registeredIds = new Set(((regData || []) as { event_id: string }[]).map((r) => r.event_id));
       }
 
-      const rawEvents = (evData || []) as any[];
       const parsedEvents: UpcomingEvent[] = rawEvents.map((ev) => ({
         id: ev.id,
         club_id: ev.club_id,
@@ -133,26 +189,47 @@ const Index = () => {
       }));
       setEvents(parsedEvents);
 
-      // 3. Fetch Official Announcements
-      const { data: notices, error: noticesErr } = await supabase
-        .from("channel_messages")
-        .select(`
-          id,
-          content,
-          created_at,
-          club_channels:channel_id (
-            club_id,
-            type,
-            clubs:club_id (name)
-          ),
-          profiles:sender_id (username)
-        `)
-        .order("created_at", { ascending: false })
-        .limit(5);
+      // 3. Fetch Official Announcements (filtered by sender branch if branch scope active)
+      let rawNotices: any[] = [];
+      if (isBranchFilterActive && profile?.branch_id) {
+        const { data, error } = await supabase
+          .from("channel_messages")
+          .select(`
+            id,
+            content,
+            created_at,
+            club_channels:channel_id (
+              club_id,
+              type,
+              clubs:club_id (name)
+            ),
+            profiles!sender_id (username, branch_id)
+          `)
+          .eq("profiles.branch_id", profile.branch_id)
+          .order("created_at", { ascending: false })
+          .limit(5);
+        if (error) throw error;
+        rawNotices = data || [];
+      } else {
+        const { data, error } = await supabase
+          .from("channel_messages")
+          .select(`
+            id,
+            content,
+            created_at,
+            club_channels:channel_id (
+              club_id,
+              type,
+              clubs:club_id (name)
+            ),
+            profiles:sender_id (username)
+          `)
+          .order("created_at", { ascending: false })
+          .limit(5);
+        if (error) throw error;
+        rawNotices = data || [];
+      }
 
-      if (noticesErr) throw noticesErr;
-
-      const rawNotices = (notices || []) as any[];
       const announcementNotices: AnnouncementNotice[] = rawNotices
         .filter((n) => n && n.club_channels && n.club_channels.type === "announcements")
         .map((n) => ({
@@ -171,7 +248,7 @@ const Index = () => {
     } finally {
       setLoading(false);
     }
-  }, [user]);
+  }, [user, profile?.branch_id, feedScope]);
 
   useEffect(() => {
     loadCampusFeed();
@@ -267,10 +344,15 @@ const Index = () => {
                   Discover student clubs, attend technical workshops, cultural fests, and stay updated with official notices.
                 </p>
 
-                {studentBranch && (
+                {verifiedBranch ? (
                   <div className="inline-flex items-center gap-1.5 rounded-lg bg-background/80 border px-2.5 py-1 text-[11px] font-semibold text-foreground">
                     <GraduationCap className="h-3.5 w-3.5 text-primary" />
-                    <span>{studentBranch.course} {studentBranch.branchCode} • {studentBranch.admissionYear} Cohort</span>
+                    <span>{verifiedBranch.course} {verifiedBranch.branch_code} • {profile?.year ? `${profile.year} Year` : "Verified Student"}</span>
+                  </div>
+                ) : (
+                  <div className="inline-flex items-center gap-1.5 rounded-lg bg-background/80 border px-2.5 py-1 text-[11px] text-muted-foreground">
+                    <GraduationCap className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span>General Student • College-wide Access</span>
                   </div>
                 )}
 
@@ -312,25 +394,33 @@ const Index = () => {
               <div className="flex items-center justify-between text-xs px-0.5">
                 <span className="font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Community Scope</span>
                 <span className="text-[11px] text-muted-foreground font-medium">
-                  {feedScope === "branch" ? (studentBranch ? studentBranch.displayName : "Your Branch") : "All Campus Departments"}
+                  {feedScope === "branch" && profile?.branch_id
+                    ? (verifiedBranch ? `${verifiedBranch.course} ${verifiedBranch.branch_code}` : "My Branch")
+                    : "All Campus Departments"}
                 </span>
               </div>
               <div className="flex items-center justify-between rounded-xl bg-secondary/50 p-1 border">
                 <button
-                  onClick={() => setFeedScope("branch")}
+                  onClick={() => {
+                    if (!profile?.branch_id) {
+                      toast.info("Your account is not linked to an active academic branch. Scope remains college-wide.");
+                      return;
+                    }
+                    setFeedScope("branch");
+                  }}
                   className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
-                    feedScope === "branch"
+                    feedScope === "branch" && profile?.branch_id
                       ? "bg-background text-foreground shadow-xs border"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   <GraduationCap className="h-3.5 w-3.5 text-primary" />
-                  <span>My Branch {studentBranch ? `(${studentBranch.branchCode})` : ""}</span>
+                  <span>My Branch {verifiedBranch ? `(${verifiedBranch.branch_code})` : profile?.branch_id ? "" : "(Unlinked)"}</span>
                 </button>
                 <button
                   onClick={() => setFeedScope("college")}
                   className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
-                    feedScope === "college"
+                    feedScope === "college" || !profile?.branch_id
                       ? "bg-background text-foreground shadow-xs border"
                       : "text-muted-foreground hover:text-foreground"
                   }`}

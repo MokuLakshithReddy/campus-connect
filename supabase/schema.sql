@@ -1433,6 +1433,13 @@ ALTER TABLE public.posts
 CREATE INDEX IF NOT EXISTS idx_posts_branch_id
   ON public.posts(branch_id);
 
+UPDATE public.posts p
+SET branch_id = pr.branch_id
+FROM public.profiles pr
+WHERE p.user_id = pr.id
+  AND p.branch_id IS NULL
+  AND pr.branch_id IS NOT NULL;
+
 CREATE OR REPLACE FUNCTION public.validate_student_directory_prefix()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -1450,7 +1457,8 @@ BEGIN
 
   SELECT prefix, branch_id, admission_year INTO v_matching_prefix
   FROM public.academic_branch_prefixes
-  WHERE NEW.roll_number LIKE (prefix || '%') AND is_active = true
+  WHERE left(NEW.roll_number, length(prefix)) = prefix AND is_active = true
+  ORDER BY length(prefix) DESC, prefix ASC
   LIMIT 1;
 
   IF NOT FOUND THEN
@@ -1499,6 +1507,14 @@ BEGIN
     IF OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
       RAISE EXCEPTION 'Unauthorized: Academic branch cannot be modified by student';
     END IF;
+
+    IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
+      RAISE EXCEPTION 'Unauthorized: College role cannot be self-modified';
+    END IF;
+
+    IF OLD.is_verified IS TRUE AND NEW.is_verified IS NOT TRUE THEN
+      RAISE EXCEPTION 'Unauthorized: Verified status cannot be altered';
+    END IF;
   END IF;
 
   RETURN NEW;
@@ -1535,7 +1551,8 @@ BEGIN
   INTO v_result
   FROM public.academic_branch_prefixes abp
   JOIN public.academic_branches ab ON ab.id = abp.branch_id
-  WHERE v_clean_roll LIKE (abp.prefix || '%') AND abp.is_active = true
+  WHERE left(v_clean_roll, length(abp.prefix)) = abp.prefix AND abp.is_active = true
+  ORDER BY length(abp.prefix) DESC, abp.prefix ASC
   LIMIT 1;
 
   IF NOT FOUND THEN
@@ -1559,6 +1576,120 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.resolve_student_branch(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.resolve_student_branch(TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.sync_authenticated_student_directory()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_user_id UUID := auth.uid();
+  v_profile RECORD;
+  v_dir RECORD;
+  v_branch RECORD;
+BEGIN
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  SELECT * INTO v_profile FROM public.profiles WHERE id = v_user_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Profile record not found';
+  END IF;
+
+  IF v_profile.student_id IS NULL THEN
+    RETURN jsonb_build_object('linked', false, 'reason', 'No student roll number on profile');
+  END IF;
+
+  SELECT * INTO v_dir
+  FROM public.student_directory
+  WHERE roll_number = upper(trim(v_profile.student_id)) AND is_active = true;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('linked', false, 'reason', 'Student roll number not found in active directory');
+  END IF;
+
+  UPDATE public.student_directory
+  SET profile_id = v_user_id
+  WHERE roll_number = v_dir.roll_number
+    AND (profile_id IS NULL OR profile_id = v_user_id);
+
+  SELECT * INTO v_branch FROM public.academic_branches WHERE id = v_dir.branch_id;
+
+  UPDATE public.profiles
+  SET branch_id = v_dir.branch_id,
+      department = v_branch.display_name,
+      updated_at = NOW()
+  WHERE id = v_user_id;
+
+  RETURN jsonb_build_object(
+    'linked', true,
+    'roll_number', v_dir.roll_number,
+    'branch_id', v_dir.branch_id,
+    'course', v_branch.course,
+    'branch_code', v_branch.branch_code,
+    'display_name', v_branch.display_name,
+    'admission_year', v_dir.admission_year
+  );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.sync_authenticated_student_directory() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.sync_authenticated_student_directory() TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.search_campus_students(
+  p_query TEXT DEFAULT '',
+  p_branch_id UUID DEFAULT NULL,
+  p_limit INT DEFAULT 20
+)
+RETURNS TABLE(
+  id UUID,
+  username TEXT,
+  avatar_url TEXT,
+  department TEXT,
+  student_id TEXT,
+  branch_id UUID,
+  course TEXT,
+  branch_code TEXT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_sanitized TEXT := trim(COALESCE(p_query, ''));
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  RETURN QUERY
+  SELECT 
+    p.id,
+    p.username,
+    p.avatar_url,
+    p.department,
+    p.student_id,
+    p.branch_id,
+    ab.course,
+    ab.branch_code
+  FROM public.profiles p
+  LEFT JOIN public.academic_branches ab ON ab.id = p.branch_id
+  WHERE (
+    v_sanitized = '' OR
+    p.username ILIKE ('%' || v_sanitized || '%') OR
+    p.student_id ILIKE ('%' || v_sanitized || '%') OR
+    p.department ILIKE ('%' || v_sanitized || '%')
+  )
+  AND (p_branch_id IS NULL OR p.branch_id = p_branch_id)
+  LIMIT LEAST(p_limit, 50);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.search_campus_students(TEXT, UUID, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.search_campus_students(TEXT, UUID, INT) TO authenticated;
 
 ALTER TABLE public.academic_branches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.academic_branch_prefixes ENABLE ROW LEVEL SECURITY;
@@ -1585,10 +1716,14 @@ CREATE POLICY "Prefixes viewable by authenticated users"
   USING (true);
 
 DROP POLICY IF EXISTS "Active directory records viewable by authenticated users" ON public.student_directory;
-CREATE POLICY "Active directory records viewable by authenticated users"
+DROP POLICY IF EXISTS "Students view own directory record" ON public.student_directory;
+CREATE POLICY "Students view own directory record"
   ON public.student_directory
   FOR SELECT TO authenticated
-  USING (is_active = true);
+  USING (
+    profile_id = auth.uid() OR
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+  );
 
 DROP POLICY IF EXISTS "Admins can manage student directory" ON public.student_directory;
 CREATE POLICY "Admins can manage student directory"

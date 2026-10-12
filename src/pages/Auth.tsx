@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { motion } from "framer-motion";
-import { GraduationCap, ShieldCheck, KeyRound, Loader2, Sparkles, Building2, Eye, EyeOff } from "lucide-react";
+import { GraduationCap, ShieldCheck, Loader2, Building2, Eye, EyeOff } from "lucide-react";
 import { normalizeRollNumber, findBranchForRollNumber } from "@/lib/academic-branches";
 
 const Auth = () => {
@@ -39,6 +40,16 @@ const Auth = () => {
     setLoading(true);
     try {
       const mustChange = await signIn(normalized, password);
+
+      // Verify and atomically sync student with verified directory
+      if (!isEmailMode) {
+        try {
+          await supabase.rpc("sync_authenticated_student_directory");
+        } catch (syncErr) {
+          console.warn("Directory sync info:", syncErr);
+        }
+      }
+
       if (mustChange) {
         toast.info("First login detected. Please create your private password.");
         navigate("/change-password", { replace: true });
@@ -58,13 +69,6 @@ const Auth = () => {
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleFillDemo = (roll: string) => {
-    setRollNumber(roll);
-    setPassword(roll);
-    setIsEmailMode(false);
-    toast.info(`Filled demo student credentials for ${roll}`);
   };
 
   return (
@@ -96,7 +100,7 @@ const Auth = () => {
                 <Input
                   id="auth-identifier"
                   type={isEmailMode ? "email" : "text"}
-                  placeholder={isEmailMode ? "admin@college.edu" : "e.g. 24CS0142"}
+                  placeholder={isEmailMode ? "admin@college.edu" : "e.g. 25MVCSMR0001"}
                   value={rollNumber}
                   onChange={(e) => setRollNumber(e.target.value)}
                   required
@@ -169,35 +173,6 @@ const Auth = () => {
               </p>
             </div>
 
-            {/* Demo Testing Shortcut */}
-            <div className="pt-2 border-t border-border/60">
-              <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-2">
-                <span className="flex items-center gap-1 font-medium text-foreground">
-                  <Sparkles className="h-3 w-3 text-amber-500" />
-                  Quick Demo Accounts
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleFillDemo("24CS0142")}
-                  className="h-8 text-[11px] font-mono border-dashed"
-                >
-                  24CS0142
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleFillDemo("24IT0089")}
-                  className="h-8 text-[11px] font-mono border-dashed"
-                >
-                  24IT0089
-                </Button>
-              </div>
-            </div>
 
             <div className="text-center pt-1">
               <button
