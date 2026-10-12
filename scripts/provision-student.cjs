@@ -83,7 +83,6 @@ const req = https.request(options, (res) => {
               console.log(`   - Username: ${prof.username}`);
               console.log(`   - Student ID: ${prof.student_id}`);
               console.log(`   - College Role: ${prof.college_role}`);
-              console.log(`   - Must Change Password: ${prof.must_change_password}`);
               console.log(`   - Is Verified: ${prof.is_verified}`);
             } else {
               console.warn(`⚠️ Profile row not found for user ${user.id}`);

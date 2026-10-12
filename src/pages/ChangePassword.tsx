@@ -10,7 +10,7 @@ import { motion } from "framer-motion";
 import { KeyRound, ShieldAlert, CheckCircle2, Loader2, LogOut } from "lucide-react";
 
 const ChangePassword = () => {
-  const { profile, user, completePasswordChange, signOut } = useAuth();
+  const { profile, user, mustChangePassword, completePasswordChange, signOut } = useAuth();
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -40,7 +40,11 @@ const ChangePassword = () => {
     setLoading(true);
     try {
       await completePasswordChange(newPassword);
-      toast.success("Password set successfully! Welcome to CampusConnect.");
+      toast.success(
+        mustChangePassword
+          ? "Password set successfully! Welcome to CampusConnect."
+          : "Password updated successfully."
+      );
       // Short delay to ensure state and toast register smoothly before navigation
       setTimeout(() => {
         navigate("/", { replace: true });
@@ -76,10 +80,12 @@ const ChangePassword = () => {
               <KeyRound className="h-7 w-7" />
             </div>
             <CardTitle className="text-xl font-bold tracking-tight">
-              Create Your New Password
+              {mustChangePassword ? "Create Your New Password" : "Change Your Password"}
             </CardTitle>
             <CardDescription className="text-xs text-muted-foreground mt-1">
-              CampusConnect requires all students to change their temporary password before accessing clubs and events.
+              {mustChangePassword
+                ? "CampusConnect requires all students to change their temporary password before accessing clubs and events."
+                : "Update your CampusConnect password to keep your account secure."}
             </CardDescription>
           </CardHeader>
 
@@ -87,9 +93,13 @@ const ChangePassword = () => {
             <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-muted-foreground flex gap-2.5 items-start">
               <ShieldAlert className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
               <div>
-                <p className="font-medium text-foreground">First-Time Setup Required</p>
+                <p className="font-medium text-foreground">
+                  {mustChangePassword ? "First-Time Setup Required" : "Password Update"}
+                </p>
                 <p className="mt-0.5">
-                  Logged in as <strong className="font-mono text-foreground">{rollNumber}</strong>. Your temporary password will stop working immediately after this step.
+                  {mustChangePassword
+                    ? <>Logged in as <strong className="font-mono text-foreground">{rollNumber}</strong>. Your temporary password will stop working immediately after this step.</>
+                    : <>Logged in as <strong className="font-mono text-foreground">{rollNumber}</strong>. Choose a new password for your account.</>}
                 </p>
               </div>
             </div>
@@ -157,7 +167,7 @@ const ChangePassword = () => {
                     Updating Password...
                   </>
                 ) : (
-                  "Save Password & Enter Platform"
+                  mustChangePassword ? "Save Password & Enter Platform" : "Save New Password"
                 )}
               </Button>
             </form>

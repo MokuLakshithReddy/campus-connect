@@ -628,6 +628,15 @@ export type Database = {
         }
         Returns: Json
       }
+      get_event_registration_stats: {
+        Args: {
+          p_event_ids: string[]
+        }
+        Returns: {
+          event_id: string
+          registration_count: number
+        }[]
+      }
       check_in_event_attendee: {
         Args: {
           p_event_id: string
@@ -658,6 +667,10 @@ export type Database = {
           p_user_id: string
           p_is_verified: boolean
         }
+        Returns: Json
+      }
+      complete_first_time_password_change: {
+        Args: Record<PropertyKey, never>
         Returns: Json
       }
     }
