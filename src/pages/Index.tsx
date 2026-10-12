@@ -22,6 +22,7 @@ import {
   Compass,
   CheckCircle2,
   User,
+  AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -64,22 +65,25 @@ const Index = () => {
   const [featuredClubs, setFeaturedClubs] = useState<FeaturedClub[]>([]);
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [loading, setLoading] = useState(true);
+  const [feedError, setFeedError] = useState<string | null>(null);
 
   const loadCampusFeed = useCallback(async () => {
     try {
       setLoading(true);
+      setFeedError(null);
 
       // 1. Fetch Featured Active Clubs
-      const { data: clubsData } = await supabase
+      const { data: clubsData, error: clubsErr } = await supabase
         .from("clubs")
         .select("id, name, description, category, status")
         .eq("status", "active")
         .limit(6);
 
+      if (clubsErr) throw clubsErr;
       setFeaturedClubs((clubsData || []) as FeaturedClub[]);
 
       // 2. Fetch Upcoming Campus Events
-      const { data: evData } = await supabase
+      const { data: evData, error: evErr } = await supabase
         .from("events")
         .select(`
           id,
@@ -94,14 +98,19 @@ const Index = () => {
         .order("start_time", { ascending: true })
         .limit(4);
 
+      if (evErr) throw evErr;
+
       let registeredIds = new Set<string>();
       if (user?.id) {
-        const { data: regData } = await supabase
+        const { data: regData, error: regErr } = await supabase
           .from("event_registrations")
           .select("event_id")
           .eq("user_id", user.id)
           .eq("status", "registered");
 
+        if (regErr) {
+          console.warn("Could not check user event registrations:", regErr.message);
+        }
         registeredIds = new Set(((regData || []) as { event_id: string }[]).map((r) => r.event_id));
       }
 
@@ -119,7 +128,7 @@ const Index = () => {
       setEvents(parsedEvents);
 
       // 3. Fetch Official Announcements
-      const { data: notices } = await supabase
+      const { data: notices, error: noticesErr } = await supabase
         .from("channel_messages")
         .select(`
           id,
@@ -135,6 +144,8 @@ const Index = () => {
         .order("created_at", { ascending: false })
         .limit(5);
 
+      if (noticesErr) throw noticesErr;
+
       const rawNotices = (notices || []) as any[];
       const announcementNotices: AnnouncementNotice[] = rawNotices
         .filter((n) => n && n.club_channels && n.club_channels.type === "announcements")
@@ -148,7 +159,9 @@ const Index = () => {
         }));
       setAnnouncements(announcementNotices);
     } catch (err: unknown) {
-      console.error("Campus feed error:", err);
+      const e = err as Error;
+      console.error("Campus feed error:", e);
+      setFeedError(e.message || "Failed to load campus activities");
     } finally {
       setLoading(false);
     }
@@ -222,6 +235,15 @@ const Index = () => {
           <div className="flex flex-col items-center justify-center py-20 gap-2 text-muted-foreground">
             <Loader2 className="h-6 w-6 animate-spin text-primary" />
             <p className="text-xs">Loading campus activities...</p>
+          </div>
+        ) : feedError ? (
+          <div className="p-6 flex flex-col items-center justify-center text-center py-20">
+            <AlertCircle className="h-12 w-12 text-destructive mb-3" />
+            <h2 className="text-base font-semibold">Unable to load campus feed</h2>
+            <p className="mt-1 text-xs text-muted-foreground max-w-xs">{feedError}</p>
+            <Button size="sm" onClick={loadCampusFeed} className="mt-4">
+              Try Again
+            </Button>
           </div>
         ) : (
           <div className="p-4 space-y-6">

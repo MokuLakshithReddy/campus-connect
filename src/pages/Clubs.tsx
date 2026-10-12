@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
-import { Search, Users, GraduationCap, ChevronRight, Plus, Check, Clock, Loader2, ShieldCheck } from "lucide-react";
+import { Search, Users, GraduationCap, ChevronRight, Plus, Check, Clock, Loader2, ShieldCheck, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
@@ -35,6 +35,7 @@ const Clubs = () => {
   const [clubs, setClubs] = useState<ClubWithMeta[]>([]);
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -51,14 +52,18 @@ const Clubs = () => {
   const fetchClubs = useCallback(async () => {
     try {
       setLoading(true);
+      setLoadError(null);
 
       // Fetch user profile to check role
       if (user?.id) {
-        const { data: profData } = await supabase
+        const { data: profData, error: profErr } = await supabase
           .from("profiles")
           .select("*")
           .eq("id", user.id)
           .maybeSingle();
+        if (profErr) {
+          console.warn("Could not fetch user profile in Clubs:", profErr.message);
+        }
         if (profData) {
           setProfile(profData as unknown as StudentProfile);
         }
@@ -73,9 +78,11 @@ const Clubs = () => {
       if (clubsErr) throw clubsErr;
 
       // Fetch memberships
-      const { data: membersData } = await supabase
+      const { data: membersData, error: membersErr } = await supabase
         .from("club_memberships")
         .select("club_id, user_id, role, status");
+
+      if (membersErr) throw membersErr;
 
       const memberships = (membersData || []) as unknown as ClubMembership[];
 
@@ -96,6 +103,7 @@ const Clubs = () => {
     } catch (err: unknown) {
       const error = err as Error;
       console.error("Error fetching clubs:", error);
+      setLoadError(error.message || "Failed to load clubs");
       toast.error("Failed to load clubs");
     } finally {
       setLoading(false);
@@ -349,6 +357,15 @@ const Clubs = () => {
             <div className="flex flex-col items-center justify-center py-16 gap-2 text-muted-foreground">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
               <p className="text-xs">Loading campus clubs...</p>
+            </div>
+          ) : loadError ? (
+            <div className="text-center py-16 px-4 rounded-xl border border-destructive/20 bg-destructive/5 text-muted-foreground">
+              <AlertCircle className="mx-auto h-10 w-10 text-destructive mb-2" />
+              <p className="font-semibold text-sm text-foreground">Could not load campus clubs</p>
+              <p className="text-xs mt-1 max-w-sm mx-auto">{loadError}</p>
+              <Button size="sm" onClick={fetchClubs} className="mt-4">
+                Try Again
+              </Button>
             </div>
           ) : filteredClubs.length === 0 ? (
             <div className="text-center py-12 px-4 rounded-xl border border-dashed text-muted-foreground">

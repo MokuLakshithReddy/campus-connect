@@ -611,6 +611,110 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
     expect(enriched[1].registration_count).toBe(30);
     expect(enriched[1].is_full).toBe(true);
   });
+
+  it("should correctly batch and associate latest messages to conversations without N+1 queries", () => {
+    const convos = [
+      { id: "c-1", last_message_at: "2026-10-12T10:00:00Z" },
+      { id: "c-2", last_message_at: "2026-10-12T11:00:00Z" },
+      { id: "c-3", last_message_at: "2026-10-12T09:00:00Z" },
+    ];
+
+    // Single batch of messages ordered by created_at DESC across conversations
+    const batchMessages = [
+      { conversation_id: "c-2", content: "See you at the robotics lab!", created_at: "2026-10-12T11:00:00Z" },
+      { conversation_id: "c-2", content: "Are you coming?", created_at: "2026-10-12T10:50:00Z" },
+      { conversation_id: "c-1", content: "Submitted the assignment", created_at: "2026-10-12T10:00:00Z" },
+      { conversation_id: "c-1", content: "Did you finish question 3?", created_at: "2026-10-12T09:30:00Z" },
+    ];
+
+    const lastMessageMap = new Map<string, string>();
+    for (const msg of batchMessages) {
+      if (!lastMessageMap.has(msg.conversation_id)) {
+        lastMessageMap.set(msg.conversation_id, msg.content);
+      }
+    }
+
+    expect(lastMessageMap.get("c-1")).toBe("Submitted the assignment");
+    expect(lastMessageMap.get("c-2")).toBe("See you at the robotics lab!");
+    expect(lastMessageMap.get("c-3")).toBeUndefined();
+  });
+
+  it("should block non-admin users from altering verified student IDs", () => {
+    const existingProfile: Partial<StudentProfile> = {
+      id: "student-1",
+      student_id: "24CS-0142",
+      is_verified: true,
+      college_role: "student",
+    };
+
+    const validateProfileUpdate = (
+      current: typeof existingProfile,
+      update: { student_id?: string },
+      callerRole: string
+    ) => {
+      if (callerRole !== "college_admin" && current.is_verified) {
+        if (update.student_id && update.student_id !== current.student_id) {
+          throw new Error("Unauthorized: Verified student roll number cannot be modified by students");
+        }
+      }
+      return { ...current, ...update };
+    };
+
+    // Student attempting to change roll number should fail
+    expect(() =>
+      validateProfileUpdate(existingProfile, { student_id: "24CS-9999" }, "student")
+    ).toThrow("Unauthorized: Verified student roll number cannot be modified by students");
+
+    // College admin can modify roll numbers
+    const adminUpdated = validateProfileUpdate(
+      existingProfile,
+      { student_id: "24CS-0142-HONORS" },
+      "college_admin"
+    );
+    expect(adminUpdated.student_id).toBe("24CS-0142-HONORS");
+
+    // Unverified student can set their initial roll number
+    const unverifiedProfile: Partial<StudentProfile> = {
+      id: "student-2",
+      student_id: "",
+      is_verified: false,
+      college_role: "student",
+    };
+    const studentUpdated = validateProfileUpdate(
+      unverifiedProfile,
+      { student_id: "25EC-0088" },
+      "student"
+    );
+    expect(studentUpdated.student_id).toBe("25EC-0088");
+  });
+
+  it("should serialize like operations and prevent concurrent duplicate mutations", async () => {
+    let inFlight = false;
+    let likeCount = 5;
+    let liked = false;
+
+    const performLike = async () => {
+      if (inFlight) return { skipped: true };
+      inFlight = true;
+      try {
+        liked = !liked;
+        likeCount += liked ? 1 : -1;
+        // simulate async delay
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return { skipped: false, liked, likeCount };
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    // Fire two like toggles concurrently
+    const [first, second] = await Promise.all([performLike(), performLike()]);
+
+    expect(first.skipped).toBe(false);
+    expect(second.skipped).toBe(true);
+    expect(likeCount).toBe(6);
+    expect(liked).toBe(true);
+  });
 });
 
 

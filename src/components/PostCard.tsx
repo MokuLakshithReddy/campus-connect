@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Heart, MessageCircle, Send } from "lucide-react";
 import PostActions from "@/components/PostActions";
 import SharePostDialog from "@/components/SharePostDialog";
@@ -34,6 +34,8 @@ const PostCard = ({ post, onLikeToggle, onCommentOpen }: PostCardProps) => {
   const [likeCount, setLikeCount] = useState(post.likes?.length ?? 0);
   const [showHeart, setShowHeart] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [likeLoading, setLikeLoading] = useState(false);
+  const isLikingRef = useRef(false);
 
   useEffect(() => {
     setLiked(isLiked);
@@ -41,33 +43,48 @@ const PostCard = ({ post, onLikeToggle, onCommentOpen }: PostCardProps) => {
   }, [post.likes, isLiked]);
 
   const toggleLike = async () => {
-    if (!user) return;
-    const newLiked = !liked;
-    setLiked(newLiked);
-    setLikeCount((c) => c + (newLiked ? 1 : -1));
+    if (!user || isLikingRef.current) return;
+    isLikingRef.current = true;
+    setLikeLoading(true);
 
-    if (newLiked) {
-      const { error } = await supabase.from("likes").insert({ user_id: user.id, post_id: post.id });
-      if (error) {
-        setLiked(!newLiked);
-        setLikeCount((c) => c - 1);
-        toast.error("Could not like post");
-        return;
+    const targetLiked = !liked;
+    setLiked(targetLiked);
+    setLikeCount((c) => Math.max(0, c + (targetLiked ? 1 : -1)));
+
+    try {
+      if (targetLiked) {
+        const { error } = await supabase.from("likes").insert({ user_id: user.id, post_id: post.id });
+        if (error) {
+          // If code 23505 (unique key constraint), record already existed - keep liked state
+          if (error.code === "23505") {
+            setLiked(true);
+          } else {
+            setLiked(false);
+            setLikeCount((c) => Math.max(0, c - 1));
+            toast.error("Could not like post");
+            return;
+          }
+        }
+      } else {
+        const { error } = await supabase.from("likes").delete().eq("user_id", user.id).eq("post_id", post.id);
+        if (error) {
+          setLiked(true);
+          setLikeCount((c) => c + 1);
+          toast.error("Could not unlike post");
+          return;
+        }
       }
-    } else {
-      const { error } = await supabase.from("likes").delete().eq("user_id", user.id).eq("post_id", post.id);
-      if (error) {
-        setLiked(!newLiked);
-        setLikeCount((c) => c + 1);
-        toast.error("Could not unlike post");
-        return;
-      }
+      onLikeToggle?.();
+    } catch (err: unknown) {
+      console.error("Like mutation error:", err);
+    } finally {
+      isLikingRef.current = false;
+      setLikeLoading(false);
     }
-    onLikeToggle?.();
   };
 
   const handleDoubleClick = () => {
-    if (!liked) toggleLike();
+    if (!liked && !isLikingRef.current) toggleLike();
     setShowHeart(true);
     setTimeout(() => setShowHeart(false), 800);
   };
@@ -126,7 +143,7 @@ const PostCard = ({ post, onLikeToggle, onCommentOpen }: PostCardProps) => {
       {/* Actions */}
       <div className="px-4 py-3">
         <div className="flex items-center gap-4">
-          <button onClick={toggleLike}>
+          <button onClick={toggleLike} disabled={likeLoading} aria-label="Like post">
             <Heart
               className={cn(
                 "h-6 w-6 transition-colors",

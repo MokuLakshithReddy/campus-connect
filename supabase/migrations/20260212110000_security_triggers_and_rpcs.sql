@@ -101,6 +101,9 @@ BEGIN
       IF NEW.must_change_password IS DISTINCT FROM OLD.must_change_password AND NEW.must_change_password = false THEN
         RAISE EXCEPTION 'Unauthorized: Password change flag can only be updated via password reset workflow';
       END IF;
+      IF OLD.is_verified = true AND NEW.student_id IS DISTINCT FROM OLD.student_id THEN
+        RAISE EXCEPTION 'Unauthorized: Verified student roll number cannot be modified by students';
+      END IF;
     END IF;
   END IF;
 

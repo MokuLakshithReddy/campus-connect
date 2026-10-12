@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import AppLayout from "@/components/AppLayout";
@@ -13,10 +13,32 @@ const CreatePost = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
+  const previewRef = useRef<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [caption, setCaption] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const revokePreview = () => {
+    if (previewRef.current) {
+      URL.revokeObjectURL(previewRef.current);
+      previewRef.current = null;
+    }
+  };
+
+  // Cleanup on unmount to avoid memory leaks
+  useEffect(() => {
+    return () => {
+      revokePreview();
+    };
+  }, []);
+
+  const handleClearFile = () => {
+    revokePreview();
+    setFile(null);
+    setPreview(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -32,8 +54,13 @@ const CreatePost = () => {
       return;
     }
 
+    // Revoke previous preview URL before allocating a new one
+    revokePreview();
+
+    const objUrl = URL.createObjectURL(f);
+    previewRef.current = objUrl;
     setFile(f);
-    setPreview(URL.createObjectURL(f));
+    setPreview(objUrl);
   };
 
   const handleSubmit = async () => {
@@ -55,11 +82,16 @@ const CreatePost = () => {
         caption: caption.trim(),
       });
       if (insertError) {
-        // Rollback uploaded storage file
-        await supabase.storage.from("posts").remove([path]);
+        // Rollback uploaded storage file if database record insertion fails
+        try {
+          await supabase.storage.from("posts").remove([path]);
+        } catch (rollbackErr) {
+          console.error("Storage rollback failed:", rollbackErr);
+        }
         throw insertError;
       }
 
+      revokePreview();
       toast.success("Post shared!");
       navigate("/");
     } catch (err: unknown) {
@@ -101,10 +133,7 @@ const CreatePost = () => {
           <div className="relative">
             <img src={preview} alt="Preview" className="w-full rounded-2xl object-cover" />
             <button
-              onClick={() => {
-                setFile(null);
-                setPreview(null);
-              }}
+              onClick={handleClearFile}
               className="absolute right-3 top-3 rounded-full bg-foreground/70 p-1.5 text-background"
             >
               <X className="h-4 w-4" />
