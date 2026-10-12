@@ -796,7 +796,42 @@ BEGIN
     'checked_in_at', NOW()
   );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
+REVOKE EXECUTE ON FUNCTION public.check_in_event_attendee(UUID, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.check_in_event_attendee(UUID, TEXT) TO authenticated;
+
+-- 3b. EVENT REGISTRATION STATISTICS RPC
+CREATE OR REPLACE FUNCTION public.get_event_registration_stats(p_event_ids UUID[])
+RETURNS TABLE (
+  event_id UUID,
+  registration_count BIGINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required to view event registration statistics';
+  END IF;
+
+  RETURN QUERY
+  SELECT 
+    ev.id AS event_id,
+    COUNT(er.id)::BIGINT AS registration_count
+  FROM unnest(p_event_ids) AS req(id)
+  JOIN public.events ev ON ev.id = req.id
+  LEFT JOIN public.event_registrations er 
+    ON er.event_id = ev.id 
+    AND er.status IN ('registered', 'attended')
+  GROUP BY ev.id;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.get_event_registration_stats(UUID[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_event_registration_stats(UUID[]) TO authenticated;
 
 -- 4. VERIFY STUDENT ACCOUNT (Admin Only)
 CREATE OR REPLACE FUNCTION public.verify_student_account(p_user_id UUID, p_is_verified BOOLEAN)

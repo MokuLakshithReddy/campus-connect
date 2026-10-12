@@ -11,6 +11,7 @@ import {
   CheckCheck,
   Bell,
   Loader2,
+  AlertCircle,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
@@ -24,11 +25,13 @@ const Notifications = () => {
   const navigate = useNavigate();
   const [notifications, setNotifications] = useState<CampusNotification[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const fetchNotifications = useCallback(async () => {
     if (!user) return;
     try {
       setLoading(true);
+      setLoadError(null);
       const { data, error } = await supabase
         .from("notifications")
         .select("*")
@@ -41,6 +44,7 @@ const Notifications = () => {
     } catch (err: unknown) {
       const error = err as Error;
       console.error("Notifications fetch error:", error);
+      setLoadError(error.message || "Failed to load notifications");
     } finally {
       setLoading(false);
     }
@@ -92,10 +96,13 @@ const Notifications = () => {
 
   const handleNotificationClick = async (n: CampusNotification) => {
     if (!n.is_read) {
-      await supabase
+      const { error: markErr } = await supabase
         .from("notifications")
         .update({ is_read: true })
         .eq("id", n.id);
+      if (markErr) {
+        console.warn("Could not mark notification as read:", markErr.message);
+      }
     }
 
     if (n.resource_type === "club" && n.resource_id) {
@@ -158,6 +165,15 @@ const Notifications = () => {
         <div className="flex flex-col items-center justify-center py-20 gap-2 text-muted-foreground">
           <Loader2 className="h-6 w-6 animate-spin text-primary" />
           <p className="text-xs">Loading notifications...</p>
+        </div>
+      ) : loadError ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center px-4">
+          <AlertCircle className="h-12 w-12 text-destructive mb-3" />
+          <h2 className="text-base font-semibold">Could not load notifications</h2>
+          <p className="mt-1 text-xs text-muted-foreground max-w-xs">{loadError}</p>
+          <Button size="sm" onClick={fetchNotifications} className="mt-4">
+            Try Again
+          </Button>
         </div>
       ) : notifications.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 text-center px-4">

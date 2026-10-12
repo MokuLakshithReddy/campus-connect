@@ -545,11 +545,12 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
     expect(renderedResult).toBe("lakshith");
   });
 
-  it("should sanitize PostgREST filter characters from search queries to prevent syntax injection", () => {
-    // Tests comma stripping
-    expect(sanitizeSearchQuery("student,name")).toBe("student name");
-    // Tests parentheses and colon stripping
-    expect(sanitizeSearchQuery("filter:eq(val)")).toBe("filter eq val");
+  it("should sanitize PostgREST filter characters and escape SQL wildcards from search queries", () => {
+    // Tests comma, parentheses, colon, and asterisk stripping
+    expect(sanitizeSearchQuery("student,name*(filter:eq)")).toBe("student name filter eq");
+    // Tests SQL ILIKE wildcard character escaping for literal matching
+    expect(sanitizeSearchQuery("100% attendance")).toBe("100\\% attendance");
+    expect(sanitizeSearchQuery("john_doe")).toBe("john\\_doe");
     // Tests roll numbers and department with hyphens and dots
     expect(sanitizeSearchQuery("24CS-0142")).toBe("24CS-0142");
     expect(sanitizeSearchQuery("B.Tech CSE")).toBe("B.Tech CSE");
@@ -714,6 +715,73 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
     expect(second.skipped).toBe(true);
     expect(likeCount).toBe(6);
     expect(liked).toBe(true);
+  });
+
+  it("should deduplicate incoming realtime messages by message ID without adding duplicates", () => {
+    interface Message {
+      id: string;
+      content: string;
+    }
+
+    const existing: Message[] = [
+      { id: "m-1", content: "Hello campus!" },
+      { id: "m-2", content: "Are you attending the hackathon?" },
+    ];
+
+    const deduplicateAppend = (prev: Message[], incoming: Message) => {
+      if (prev.some((m) => m.id === incoming.id)) {
+        return prev;
+      }
+      return [...prev, incoming];
+    };
+
+    // Duplicate message received via reconnect/race
+    const updated1 = deduplicateAppend(existing, { id: "m-2", content: "Are you attending the hackathon?" });
+    expect(updated1.length).toBe(2);
+
+    // Truly new message received
+    const updated2 = deduplicateAppend(existing, { id: "m-3", content: "Yes, I just registered." });
+    expect(updated2.length).toBe(3);
+    expect(updated2[2].id).toBe("m-3");
+  });
+
+  it("should distinguish failed registration stats (null) from confirmed zero attendance", () => {
+    const rawEvents: CampusEvent[] = [
+      {
+        id: "ev-1",
+        club_id: "club-1",
+        title: "Coding Contest",
+        description: null,
+        poster_url: null,
+        venue: "Hall A",
+        start_time: "2026-10-25T10:00:00Z",
+        end_time: null,
+        capacity: 50,
+        is_published: true,
+        created_by: "user-1",
+        created_at: "2026-10-01T00:00:00Z",
+      },
+    ];
+
+    // Scenario A: RPC fails (e.g. network failure) -> statsLoaded = false
+    const statsLoadedFailure = false;
+    const registrationCounts = new Map<string, number>();
+
+    const enrichedOnFailure = rawEvents.map((ev) => ({
+      ...ev,
+      registration_count: statsLoadedFailure ? (registrationCounts.get(ev.id) || 0) : null,
+    }));
+    expect(enrichedOnFailure[0].registration_count).toBeNull();
+
+    // Scenario B: RPC succeeds with 0 registrations -> statsLoaded = true
+    const statsLoadedSuccess = true;
+    registrationCounts.set("ev-1", 0);
+
+    const enrichedOnSuccess = rawEvents.map((ev) => ({
+      ...ev,
+      registration_count: statsLoadedSuccess ? (registrationCounts.get(ev.id) || 0) : null,
+    }));
+    expect(enrichedOnSuccess[0].registration_count).toBe(0);
   });
 });
 

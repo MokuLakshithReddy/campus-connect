@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   ArrowLeft,
@@ -53,7 +53,7 @@ interface MemberWithProfile extends ClubMembership {
 }
 
 interface EventWithMeta extends CampusEvent {
-  registration_count: number;
+  registration_count: number | null;
   is_registered: boolean;
 }
 
@@ -130,21 +130,24 @@ const ClubWorkspace = () => {
 
       // 3. Fetch User Membership
       if (user?.id) {
-        const { data: mData } = await supabase
+        const { data: mData, error: mErr } = await supabase
           .from("club_memberships")
           .select("*")
           .eq("club_id", clubId)
           .eq("user_id", user.id)
           .maybeSingle();
+        if (mErr) console.warn("Could not load user club membership:", mErr.message);
         setMembership((mData as unknown as ClubMembership) || null);
       }
 
       // 4. Fetch Channels
-      const { data: chData } = await supabase
+      const { data: chData, error: chErr } = await supabase
         .from("club_channels")
         .select("*")
         .eq("club_id", clubId)
         .order("created_at", { ascending: true });
+
+      if (chErr) throw chErr;
 
       const chList = (chData || []) as unknown as ClubChannel[];
       setChannels(chList);
@@ -154,7 +157,7 @@ const ClubWorkspace = () => {
       }
 
       // 5. Fetch Members (active and pending)
-      const { data: memData } = await supabase
+      const { data: memData, error: memErr } = await supabase
         .from("club_memberships")
         .select(`
           id,
@@ -171,6 +174,8 @@ const ClubWorkspace = () => {
           )
         `)
         .eq("club_id", clubId);
+
+      if (memErr) throw memErr;
 
       if (memData) {
         const parsedMembers: MemberWithProfile[] = memData.map((m: any) => ({
@@ -191,22 +196,28 @@ const ClubWorkspace = () => {
       }
 
       // 6. Fetch Events & Registrations
-      const { data: evData } = await supabase
+      const { data: evData, error: evErr } = await supabase
         .from("events")
         .select("*")
         .eq("club_id", clubId)
         .order("start_time", { ascending: true });
 
+      if (evErr) throw evErr;
+
       if (evData) {
         const rawEvents = evData as unknown as CampusEvent[];
         const eventIds = rawEvents.map((ev) => ev.id);
         const registrationCounts = new Map<string, number>();
+        let statsLoaded = false;
 
         if (eventIds.length > 0) {
           const { data: statsData, error: statsErr } = await supabase.rpc("get_event_registration_stats", {
             p_event_ids: eventIds,
           });
-          if (!statsErr && statsData) {
+          if (statsErr) {
+            console.warn("Could not load event registration statistics:", statsErr.message);
+          } else if (statsData) {
+            statsLoaded = true;
             for (const stat of statsData) {
               registrationCounts.set(stat.event_id, Number(stat.registration_count));
             }
@@ -215,10 +226,11 @@ const ClubWorkspace = () => {
 
         let myRegs: EventRegistration[] = [];
         if (user?.id) {
-          const { data: regData } = await supabase
+          const { data: regData, error: regErr } = await supabase
             .from("event_registrations")
             .select("event_id, user_id, status")
             .eq("user_id", user.id);
+          if (regErr) console.warn("Could not load user registrations:", regErr.message);
           myRegs = (regData || []) as unknown as EventRegistration[];
         }
 
@@ -226,7 +238,7 @@ const ClubWorkspace = () => {
           const isUserReg = myRegs.some((r) => r.event_id === ev.id && r.status === "registered");
           return {
             ...ev,
-            registration_count: registrationCounts.get(ev.id) || 0,
+            registration_count: statsLoaded ? (registrationCounts.get(ev.id) || 0) : null,
             is_registered: isUserReg,
           };
         });
@@ -917,6 +929,23 @@ const ClubWorkspace = () => {
                       {ev.description}
                     </CardContent>
                   )}
+                  <CardFooter className="p-4 pt-2 border-t border-border/40 flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <Users className="h-3.5 w-3.5" />
+                      {ev.registration_count !== null ? (
+                        <span>
+                          {ev.registration_count} {ev.capacity ? `/ ${ev.capacity}` : ""} Registered
+                        </span>
+                      ) : (
+                        <span className="text-amber-500 font-medium">Count unavailable</span>
+                      )}
+                    </span>
+                    {ev.capacity && ev.registration_count !== null && ev.registration_count >= ev.capacity && (
+                      <Badge variant="outline" className="text-[10px] text-amber-500 border-amber-500/30">
+                        Capacity Reached
+                      </Badge>
+                    )}
+                  </CardFooter>
                 </Card>
               ))
             )}

@@ -109,7 +109,12 @@ const ChatConversation = () => {
         },
         async (payload) => {
           const newMsg = payload.new as ChatMessage;
-          setMessages((prev) => [...prev, newMsg]);
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMsg.id)) {
+              return prev;
+            }
+            return [...prev, newMsg];
+          });
 
           // Automatically mark incoming messages read while active in the chat
           if (newMsg.sender_id !== user.id) {

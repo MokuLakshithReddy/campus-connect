@@ -6,15 +6,17 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * Sanitizes user search query for PostgREST .or() filter expressions.
- * - Strips PostgREST reserved delimiter characters (commas, parentheses, colons) that would corrupt filter structure.
+ * Sanitizes user search query for PostgREST .or() and .ilike() filter expressions.
+ * - Strips PostgREST reserved delimiter characters (commas, parentheses, colons, asterisks) that would corrupt filter structure.
+ * - Escapes SQL LIKE / ILIKE wildcard characters (% and _) so search terms match literally.
  * - Collapses consecutive whitespace into single spaces.
- * - Preserves academic abbreviations, hyphens, and roll numbers (e.g. "24CS-0142", "B.Tech CSE").
+ * - Preserves roll numbers, academic abbreviations, hyphens, and apostrophes (e.g. "24CS-0142", "B.Tech CSE", "O'Connor").
  */
 export function sanitizeSearchQuery(query: string): string {
   if (!query) return "";
   return query
-    .replace(/[,():]/g, " ")
+    .replace(/[,():*]/g, " ")
+    .replace(/[%_]/g, "\\$&")
     .replace(/\s+/g, " ")
     .trim();
 }
