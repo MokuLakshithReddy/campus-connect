@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { Search, User, Loader2, RefreshCw, AlertCircle } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { sanitizeSearchQuery } from "@/lib/utils";
 
 interface ExplorePost {
   id: string;
@@ -58,7 +59,7 @@ const Explore = () => {
         .order("created_at", { ascending: false })
         .range(from, to);
 
-      const sanitized = query.replace(/[,().:*]/g, " ").trim();
+      const sanitized = sanitizeSearchQuery(query);
       if (sanitized) {
         req = req.ilike("caption", `%${sanitized}%`);
       }
@@ -88,7 +89,7 @@ const Explore = () => {
   // Database-backed search for student profiles with sanitization and race-condition guard
   const searchUsers = useCallback(async (query: string) => {
     const requestId = ++userRequestIdRef.current;
-    const sanitized = query.replace(/[,().:*]/g, " ").trim();
+    const sanitized = sanitizeSearchQuery(query);
     if (!sanitized) {
       setMatchingUsers([]);
       setLoadingUsers(false);

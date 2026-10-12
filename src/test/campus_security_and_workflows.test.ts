@@ -7,6 +7,7 @@ import {
   EventRegistration,
   CampusNotification,
 } from "../types/campus";
+import { sanitizeSearchQuery } from "../lib/utils";
 
 describe("CampusConnect Security & Identity Verification", () => {
   it("should enforce that student accounts cannot self-grant college_admin or verified status", () => {
@@ -545,12 +546,70 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
   });
 
   it("should sanitize PostgREST filter characters from search queries to prevent syntax injection", () => {
-    const sanitizeFilter = (raw: string) => raw.replace(/[,().:*]/g, " ").trim();
+    // Tests comma stripping
+    expect(sanitizeSearchQuery("student,name")).toBe("student name");
+    // Tests parentheses and colon stripping
+    expect(sanitizeSearchQuery("filter:eq(val)")).toBe("filter eq val");
+    // Tests roll numbers and department with hyphens and dots
+    expect(sanitizeSearchQuery("24CS-0142")).toBe("24CS-0142");
+    expect(sanitizeSearchQuery("B.Tech CSE")).toBe("B.Tech CSE");
+    // Tests collapsing repeated spaces
+    expect(sanitizeSearchQuery("  Moku   Lakshith   Reddy  ")).toBe("Moku Lakshith Reddy");
+  });
 
-    expect(sanitizeFilter("student,name")).toBe("student name");
-    expect(sanitizeFilter("filter:eq(val)")).toBe("filter eq val");
-    expect(sanitizeFilter("24cs0142")).toBe("24cs0142");
-    expect(sanitizeFilter("Lakshith Reddy")).toBe("Lakshith Reddy");
+  it("should accurately enrich events with registration stats from get_event_registration_stats RPC map", () => {
+    const rawEvents: CampusEvent[] = [
+      {
+        id: "ev-1",
+        club_id: "club-1",
+        title: "Hackathon",
+        description: null,
+        poster_url: null,
+        venue: "Auditorium",
+        start_time: "2026-10-20T10:00:00Z",
+        end_time: null,
+        capacity: 100,
+        is_published: true,
+        created_by: "user-1",
+        created_at: "2026-10-01T00:00:00Z",
+      },
+      {
+        id: "ev-2",
+        club_id: "club-1",
+        title: "Workshop",
+        description: null,
+        poster_url: null,
+        venue: "Lab 3",
+        start_time: "2026-10-22T14:00:00Z",
+        end_time: null,
+        capacity: 30,
+        is_published: true,
+        created_by: "user-1",
+        created_at: "2026-10-01T00:00:00Z",
+      },
+    ];
+
+    const statsData = [
+      { event_id: "ev-1", registration_count: 87 },
+      { event_id: "ev-2", registration_count: 30 },
+    ];
+
+    const registrationCounts = new Map<string, number>();
+    for (const stat of statsData) {
+      registrationCounts.set(stat.event_id, Number(stat.registration_count));
+    }
+
+    const enriched = rawEvents.map((ev) => ({
+      ...ev,
+      registration_count: registrationCounts.get(ev.id) || 0,
+      is_full: ev.capacity !== null && (registrationCounts.get(ev.id) || 0) >= ev.capacity,
+    }));
+
+    expect(enriched[0].registration_count).toBe(87);
+    expect(enriched[0].is_full).toBe(false);
+
+    expect(enriched[1].registration_count).toBe(30);
+    expect(enriched[1].is_full).toBe(true);
   });
 });
 

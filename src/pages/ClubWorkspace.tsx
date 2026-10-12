@@ -199,6 +199,20 @@ const ClubWorkspace = () => {
 
       if (evData) {
         const rawEvents = evData as unknown as CampusEvent[];
+        const eventIds = rawEvents.map((ev) => ev.id);
+        const registrationCounts = new Map<string, number>();
+
+        if (eventIds.length > 0) {
+          const { data: statsData, error: statsErr } = await supabase.rpc("get_event_registration_stats", {
+            p_event_ids: eventIds,
+          });
+          if (!statsErr && statsData) {
+            for (const stat of statsData) {
+              registrationCounts.set(stat.event_id, Number(stat.registration_count));
+            }
+          }
+        }
+
         let myRegs: EventRegistration[] = [];
         if (user?.id) {
           const { data: regData } = await supabase
@@ -212,7 +226,7 @@ const ClubWorkspace = () => {
           const isUserReg = myRegs.some((r) => r.event_id === ev.id && r.status === "registered");
           return {
             ...ev,
-            registration_count: ev.registration_count ?? 0,
+            registration_count: registrationCounts.get(ev.id) || 0,
             is_registered: isUserReg,
           };
         });
