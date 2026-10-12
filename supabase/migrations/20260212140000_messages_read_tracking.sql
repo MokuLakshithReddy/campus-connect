@@ -34,7 +34,11 @@ CREATE POLICY "Users can mark messages as read" ON public.messages
 
 -- 4. MESSAGE IMMUTABILITY TRIGGER (PREVENTS TAMPERING WITH CONTENT/METADATA)
 CREATE OR REPLACE FUNCTION public.protect_message_immutability()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 BEGIN
   -- Content, sender_id, conversation_id, created_at, and ID must NEVER change
   IF NEW.content IS DISTINCT FROM OLD.content OR
@@ -54,7 +58,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 DROP TRIGGER IF EXISTS trg_protect_message_immutability ON public.messages;
 CREATE TRIGGER trg_protect_message_immutability
@@ -64,7 +68,11 @@ CREATE TRIGGER trg_protect_message_immutability
 
 -- 5. NARROWLY SCOPED RPC TO MARK INCOMING CONVERSATION MESSAGES READ
 CREATE OR REPLACE FUNCTION public.mark_messages_read(p_conversation_id UUID)
-RETURNS INT AS $$
+RETURNS INT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 DECLARE
   v_user_id UUID := auth.uid();
   v_updated_count INT;
@@ -89,11 +97,19 @@ BEGIN
   GET DIAGNOSTICS v_updated_count = ROW_COUNT;
   RETURN v_updated_count;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.mark_messages_read(UUID) FROM public;
+GRANT EXECUTE ON FUNCTION public.mark_messages_read(UUID) TO authenticated;
 
 -- 6. HELPER FUNCTION TO GET UNREAD MESSAGES COUNT ACCURATELY
 CREATE OR REPLACE FUNCTION public.get_unread_messages_count()
-RETURNS INT AS $$
+RETURNS INT
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = public, pg_temp
+AS $$
 DECLARE
   v_user_id UUID := auth.uid();
   v_count INT := 0;
@@ -111,4 +127,7 @@ BEGIN
 
   RETURN v_count;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.get_unread_messages_count() FROM public;
+GRANT EXECUTE ON FUNCTION public.get_unread_messages_count() TO authenticated;

@@ -544,6 +544,8 @@ export type Database = {
           created_at: string
           id: string
           read: boolean
+          is_read: boolean
+          read_at: string | null
           sender_id: string
         }
         Insert: {
@@ -552,6 +554,8 @@ export type Database = {
           created_at?: string
           id?: string
           read?: boolean
+          is_read?: boolean
+          read_at?: string | null
           sender_id: string
         }
         Update: {
@@ -560,6 +564,8 @@ export type Database = {
           created_at?: string
           id?: string
           read?: boolean
+          is_read?: boolean
+          read_at?: string | null
           sender_id?: string
         }
         Relationships: [
@@ -672,6 +678,16 @@ export type Database = {
       complete_first_time_password_change: {
         Args: Record<PropertyKey, never>
         Returns: Json
+      }
+      get_unread_messages_count: {
+        Args: Record<PropertyKey, never>
+        Returns: number
+      }
+      mark_messages_read: {
+        Args: {
+          p_conversation_id: string
+        }
+        Returns: number
       }
     }
     Enums: {

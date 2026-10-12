@@ -212,7 +212,7 @@ const ClubWorkspace = () => {
           const isUserReg = myRegs.some((r) => r.event_id === ev.id && r.status === "registered");
           return {
             ...ev,
-            registration_count: (ev as any).registered_count ?? (ev as any).registration_count ?? 0,
+            registration_count: ev.registration_count ?? 0,
             is_registered: isUserReg,
           };
         });

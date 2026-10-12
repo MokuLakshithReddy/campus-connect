@@ -1,25 +1,24 @@
-import { useEffect, useState, useRef, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuth } from "./useAuth";
 import { toast } from "sonner";
+import { useNavigate } from "react-router-dom";
 
 interface MessagePayload {
   id: string;
   conversation_id: string;
   sender_id: string;
   content: string;
-  created_at: string;
   is_read?: boolean;
 }
 
 export const useUnreadMessages = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [unreadCount, setUnreadCount] = useState(0);
+  const [unreadCount, setUnreadCount] = useState<number>(0);
   const convoIdsRef = useRef<Set<string>>(new Set());
 
-  // Database-backed aggregate fetch of unread messages count
+  // Fetch unread count accurately from database aggregate
   const fetchUnreadCount = useCallback(async () => {
     if (!user) {
       setUnreadCount(0);
@@ -28,7 +27,7 @@ export const useUnreadMessages = () => {
 
     try {
       // 1. Try secure stored procedure aggregate
-      const { data, error } = await (supabase.rpc as any)("get_unread_messages_count");
+      const { data, error } = await supabase.rpc("get_unread_messages_count");
       if (!error && typeof data === "number") {
         setUnreadCount(data);
         return;
@@ -48,8 +47,8 @@ export const useUnreadMessages = () => {
         return;
       }
 
-      const { count } = await (supabase
-        .from("messages") as any)
+      const { count } = await supabase
+        .from("messages")
         .select("id", { count: "exact", head: true })
         .in("conversation_id", ids)
         .neq("sender_id", user.id)
@@ -94,7 +93,9 @@ export const useUnreadMessages = () => {
 
           if (!isUserConvo) return;
 
-          setUnreadCount((c) => c + 1);
+          // Fetch authoritative aggregate count from database to prevent drift/duplicates
+          await fetchUnreadCount();
+
           toast("New message received", {
             description: msg.content?.length > 50 ? msg.content.slice(0, 50) + "…" : msg.content,
             action: {
@@ -127,7 +128,7 @@ export const useUnreadMessages = () => {
 
     if (conversationId) {
       try {
-        await (supabase.rpc as any)("mark_messages_read", { p_conversation_id: conversationId });
+        await supabase.rpc("mark_messages_read", { p_conversation_id: conversationId });
       } catch (err) {
         console.error("Failed to mark conversation read:", err);
       }

@@ -520,7 +520,40 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
     expect(readMsg.read_at).toBe("2026-10-12T00:05:00Z");
     expect(readMsg.content).toBe("Hello from student B");
   });
+
+  it("should prevent stale search results by ignoring out-of-order responses using request id sequencing", async () => {
+    let latestRequestId = 0;
+    let renderedResult = "";
+
+    const simulateSearch = async (query: string, delayMs: number) => {
+      const requestId = ++latestRequestId;
+      await new Promise((r) => setTimeout(r, delayMs));
+      // Guard: only commit state if this request is still the newest
+      if (requestId === latestRequestId) {
+        renderedResult = query;
+      }
+    };
+
+    // Fast search "lakshith" dispatched after slow search "lak"
+    const slowSearch = simulateSearch("lak", 50); // Older request with high latency
+    const fastSearch = simulateSearch("lakshith", 10); // Newer request with low latency
+
+    await Promise.all([slowSearch, fastSearch]);
+
+    // The newer request ("lakshith") must prevail even though the older request ("lak") finished later
+    expect(renderedResult).toBe("lakshith");
+  });
+
+  it("should sanitize PostgREST filter characters from search queries to prevent syntax injection", () => {
+    const sanitizeFilter = (raw: string) => raw.replace(/[,().:*]/g, " ").trim();
+
+    expect(sanitizeFilter("student,name")).toBe("student name");
+    expect(sanitizeFilter("filter:eq(val)")).toBe("filter eq val");
+    expect(sanitizeFilter("24cs0142")).toBe("24cs0142");
+    expect(sanitizeFilter("Lakshith Reddy")).toBe("Lakshith Reddy");
+  });
 });
+
 
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import AppLayout from "@/components/AppLayout";
 import { getAvatarUrl, getPostImageUrl } from "@/lib/supabase-helpers";
@@ -38,9 +38,12 @@ const Explore = () => {
   const [errorPosts, setErrorPosts] = useState<string | null>(null);
 
   const navigate = useNavigate();
+  const postRequestIdRef = useRef(0);
+  const userRequestIdRef = useRef(0);
 
-  // Database-backed paginated search for posts
+  // Database-backed paginated search for posts with stale-response protection
   const fetchPosts = useCallback(async (query: string, pageNum: number, append = false) => {
+    const requestId = ++postRequestIdRef.current;
     if (pageNum === 0) setLoadingPosts(true);
     else setLoadingMore(true);
     setErrorPosts(null);
@@ -55,30 +58,38 @@ const Explore = () => {
         .order("created_at", { ascending: false })
         .range(from, to);
 
-      const trimmed = query.trim();
-      if (trimmed) {
-        req = req.ilike("caption", `%${trimmed}%`);
+      const sanitized = query.replace(/[,().:*]/g, " ").trim();
+      if (sanitized) {
+        req = req.ilike("caption", `%${sanitized}%`);
       }
 
       const { data, count, error } = await req;
       if (error) throw error;
 
+      // Discard stale out-of-order responses
+      if (requestId !== postRequestIdRef.current) return;
+
       const results = (data as unknown as ExplorePost[]) ?? [];
       setPosts((prev) => (append ? [...prev, ...results] : results));
       setHasMore(count !== null ? from + results.length < count : results.length === PAGE_SIZE);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      if (requestId !== postRequestIdRef.current) return;
       console.error("Error loading explore posts:", err);
-      setErrorPosts(err?.message || "Failed to load posts. Please try again.");
+      const e = err as Error;
+      setErrorPosts(e?.message || "Failed to load posts. Please try again.");
     } finally {
-      setLoadingPosts(false);
-      setLoadingMore(false);
+      if (requestId === postRequestIdRef.current) {
+        setLoadingPosts(false);
+        setLoadingMore(false);
+      }
     }
   }, []);
 
-  // Database-backed search for student profiles
+  // Database-backed search for student profiles with sanitization and race-condition guard
   const searchUsers = useCallback(async (query: string) => {
-    const trimmed = query.trim();
-    if (!trimmed) {
+    const requestId = ++userRequestIdRef.current;
+    const sanitized = query.replace(/[,().:*]/g, " ").trim();
+    if (!sanitized) {
       setMatchingUsers([]);
       setLoadingUsers(false);
       return;
@@ -89,16 +100,22 @@ const Explore = () => {
       const { data, error } = await supabase
         .from("profiles")
         .select("id, username, avatar_url, department, student_id")
-        .or(`username.ilike.%${trimmed}%,student_id.ilike.%${trimmed}%,department.ilike.%${trimmed}%`)
+        .or(`username.ilike.%${sanitized}%,student_id.ilike.%${sanitized}%,department.ilike.%${sanitized}%`)
         .limit(15);
 
       if (error) throw error;
+
+      // Discard stale response if a newer search request was initiated
+      if (requestId !== userRequestIdRef.current) return;
       setMatchingUsers(data ?? []);
     } catch (err) {
+      if (requestId !== userRequestIdRef.current) return;
       console.error("Error searching users:", err);
       setMatchingUsers([]);
     } finally {
-      setLoadingUsers(false);
+      if (requestId === userRequestIdRef.current) {
+        setLoadingUsers(false);
+      }
     }
   }, []);
 

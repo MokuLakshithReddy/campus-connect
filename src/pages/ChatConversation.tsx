@@ -62,7 +62,7 @@ const ChatConversation = () => {
       setMessages((msgs as unknown as ChatMessage[]) ?? []);
 
       // Mark incoming messages as read in database via secure RPC
-      await (supabase.rpc as any)("mark_messages_read", { p_conversation_id: conversationId });
+      await supabase.rpc("mark_messages_read", { p_conversation_id: conversationId });
     };
 
     fetchData();
@@ -84,7 +84,7 @@ const ChatConversation = () => {
 
           // Automatically mark incoming messages read while active in the chat
           if (newMsg.sender_id !== user.id) {
-            await (supabase.rpc as any)("mark_messages_read", { p_conversation_id: conversationId });
+            await supabase.rpc("mark_messages_read", { p_conversation_id: conversationId });
           }
         }
       )
