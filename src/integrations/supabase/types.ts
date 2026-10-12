@@ -26,6 +26,8 @@ export type Database = {
           created_by: string | null
           created_at: string
           updated_at: string
+          branch_id: string | null
+          content_visibility: "college" | "branch" | "club_members"
         }
         Insert: {
           id?: string
@@ -40,6 +42,8 @@ export type Database = {
           created_by?: string | null
           created_at?: string
           updated_at?: string
+          branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Update: {
           id?: string
@@ -54,6 +58,8 @@ export type Database = {
           created_by?: string | null
           created_at?: string
           updated_at?: string
+          branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Relationships: [
           {
@@ -157,6 +163,8 @@ export type Database = {
           attachments: Json | null
           is_pinned: boolean
           created_at: string
+          branch_id: string | null
+          content_visibility: "college" | "branch" | "club_members"
         }
         Insert: {
           id?: string
@@ -166,6 +174,8 @@ export type Database = {
           attachments?: Json | null
           is_pinned?: boolean
           created_at?: string
+          branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Update: {
           id?: string
@@ -175,6 +185,8 @@ export type Database = {
           attachments?: Json | null
           is_pinned?: boolean
           created_at?: string
+          branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Relationships: [
           {
@@ -207,6 +219,8 @@ export type Database = {
           is_published: boolean
           created_by: string | null
           created_at: string
+          branch_id: string | null
+          content_visibility: "college" | "branch" | "club_members"
         }
         Insert: {
           id?: string
@@ -221,6 +235,8 @@ export type Database = {
           is_published?: boolean
           created_by?: string | null
           created_at?: string
+          branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Update: {
           id?: string
@@ -235,6 +251,8 @@ export type Database = {
           is_published?: boolean
           created_by?: string | null
           created_at?: string
+          branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Relationships: [
           {
@@ -596,6 +614,7 @@ export type Database = {
           image_url: string
           user_id: string
           branch_id: string | null
+          content_visibility: "college" | "branch" | "club_members"
         }
         Insert: {
           caption?: string | null
@@ -604,6 +623,7 @@ export type Database = {
           image_url: string
           user_id: string
           branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Update: {
           caption?: string | null
@@ -612,6 +632,7 @@ export type Database = {
           image_url?: string
           user_id?: string
           branch_id?: string | null
+          content_visibility?: "college" | "branch" | "club_members"
         }
         Relationships: [
           {

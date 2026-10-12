@@ -95,27 +95,21 @@ const Index = () => {
 
       const isBranchFilterActive = feedScope === "branch" && Boolean(profile?.branch_id);
 
-      // 1. Fetch Featured Active Clubs (filtered by creator branch if branch scope active)
-      let clubsData: any[] = [];
+      // 1. Fetch Featured Active Clubs
+      let clubsQuery = supabase
+        .from("clubs")
+        .select("id, name, description, category, status, branch_id")
+        .eq("status", "active")
+        .limit(6);
+
       if (isBranchFilterActive && profile?.branch_id) {
-        const { data, error } = await supabase
-          .from("clubs")
-          .select("id, name, description, category, status, profiles!created_by(branch_id)")
-          .eq("status", "active")
-          .eq("profiles.branch_id", profile.branch_id)
-          .limit(6);
-        if (error) throw error;
-        clubsData = data || [];
-      } else {
-        const { data, error } = await supabase
-          .from("clubs")
-          .select("id, name, description, category, status")
-          .eq("status", "active")
-          .limit(6);
-        if (error) throw error;
-        clubsData = data || [];
+        clubsQuery = clubsQuery.eq("branch_id", profile.branch_id);
       }
-      setFeaturedClubs(clubsData.map((c) => ({
+
+      const { data: clubsData, error: clubsError } = await clubsQuery;
+      if (clubsError) throw clubsError;
+
+      setFeaturedClubs((clubsData || []).map((c) => ({
         id: c.id,
         name: c.name,
         description: c.description,
@@ -123,45 +117,29 @@ const Index = () => {
         status: c.status,
       })));
 
-      // 2. Fetch Upcoming Campus Events (filtered by organizer branch if branch scope active)
-      let rawEvents: any[] = [];
+      // 2. Fetch Upcoming Campus Events
+      let eventsQuery = supabase
+        .from("events")
+        .select(`
+          id,
+          club_id,
+          title,
+          venue,
+          start_time,
+          capacity,
+          branch_id,
+          clubs:club_id (name)
+        `)
+        .eq("is_published", true)
+        .order("start_time", { ascending: true })
+        .limit(4);
+
       if (isBranchFilterActive && profile?.branch_id) {
-        const { data, error } = await supabase
-          .from("events")
-          .select(`
-            id,
-            club_id,
-            title,
-            venue,
-            start_time,
-            capacity,
-            clubs:club_id (name),
-            profiles!created_by (branch_id)
-          `)
-          .eq("is_published", true)
-          .eq("profiles.branch_id", profile.branch_id)
-          .order("start_time", { ascending: true })
-          .limit(4);
-        if (error) throw error;
-        rawEvents = data || [];
-      } else {
-        const { data, error } = await supabase
-          .from("events")
-          .select(`
-            id,
-            club_id,
-            title,
-            venue,
-            start_time,
-            capacity,
-            clubs:club_id (name)
-          `)
-          .eq("is_published", true)
-          .order("start_time", { ascending: true })
-          .limit(4);
-        if (error) throw error;
-        rawEvents = data || [];
+        eventsQuery = eventsQuery.eq("branch_id", profile.branch_id);
       }
+
+      const { data: rawEvents, error: eventsError } = await eventsQuery;
+      if (eventsError) throw eventsError;
 
       let registeredIds = new Set<string>();
       if (user?.id) {
@@ -177,7 +155,7 @@ const Index = () => {
         registeredIds = new Set(((regData || []) as { event_id: string }[]).map((r) => r.event_id));
       }
 
-      const parsedEvents: UpcomingEvent[] = rawEvents.map((ev) => ({
+      const parsedEvents: UpcomingEvent[] = (rawEvents || []).map((ev) => ({
         id: ev.id,
         club_id: ev.club_id,
         title: ev.title,
@@ -189,48 +167,32 @@ const Index = () => {
       }));
       setEvents(parsedEvents);
 
-      // 3. Fetch Official Announcements (filtered by sender branch if branch scope active)
-      let rawNotices: any[] = [];
+      // 3. Fetch Official Announcements
+      let noticesQuery = supabase
+        .from("channel_messages")
+        .select(`
+          id,
+          content,
+          created_at,
+          branch_id,
+          club_channels:channel_id (
+            club_id,
+            type,
+            clubs:club_id (name)
+          ),
+          profiles:sender_id (username, branch_id)
+        `)
+        .order("created_at", { ascending: false })
+        .limit(5);
+
       if (isBranchFilterActive && profile?.branch_id) {
-        const { data, error } = await supabase
-          .from("channel_messages")
-          .select(`
-            id,
-            content,
-            created_at,
-            club_channels:channel_id (
-              club_id,
-              type,
-              clubs:club_id (name)
-            ),
-            profiles!sender_id (username, branch_id)
-          `)
-          .eq("profiles.branch_id", profile.branch_id)
-          .order("created_at", { ascending: false })
-          .limit(5);
-        if (error) throw error;
-        rawNotices = data || [];
-      } else {
-        const { data, error } = await supabase
-          .from("channel_messages")
-          .select(`
-            id,
-            content,
-            created_at,
-            club_channels:channel_id (
-              club_id,
-              type,
-              clubs:club_id (name)
-            ),
-            profiles:sender_id (username)
-          `)
-          .order("created_at", { ascending: false })
-          .limit(5);
-        if (error) throw error;
-        rawNotices = data || [];
+        noticesQuery = noticesQuery.eq("branch_id", profile.branch_id);
       }
 
-      const announcementNotices: AnnouncementNotice[] = rawNotices
+      const { data: rawNotices, error: noticesError } = await noticesQuery;
+      if (noticesError) throw noticesError;
+
+      const announcementNotices: AnnouncementNotice[] = (rawNotices || [])
         .filter((n) => n && n.club_channels && n.club_channels.type === "announcements")
         .map((n) => ({
           id: n.id,

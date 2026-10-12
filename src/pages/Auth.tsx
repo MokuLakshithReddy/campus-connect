@@ -41,12 +41,34 @@ const Auth = () => {
     try {
       const mustChange = await signIn(normalized, password);
 
-      // Verify and atomically sync student with verified directory
+      // Fail closed: verify and atomically sync student with verified directory
       if (!isEmailMode) {
-        try {
-          await supabase.rpc("sync_authenticated_student_directory");
-        } catch (syncErr) {
-          console.warn("Directory sync info:", syncErr);
+        const { data: syncResult, error: syncError } = await supabase.rpc(
+          "sync_authenticated_student_directory"
+        );
+
+        if (syncError) {
+          // RPC threw an exception (e.g., record claimed by another account)
+          console.error("Directory sync RPC error:", syncError);
+          await supabase.auth.signOut();
+          toast.error(
+            syncError.message?.includes("already linked")
+              ? "This roll number is already linked to another account. Contact campus administration."
+              : "Student directory verification failed. You cannot access the campus application."
+          );
+          return;
+        }
+
+        // Inspect the returned result — must have linked: true
+        const result = syncResult as { linked?: boolean; reason?: string } | null;
+        if (!result || result.linked !== true) {
+          console.error("Directory sync returned unlinked:", result);
+          await supabase.auth.signOut();
+          toast.error(
+            result?.reason ||
+              "Your student record could not be verified. Contact campus administration."
+          );
+          return;
         }
       }
 

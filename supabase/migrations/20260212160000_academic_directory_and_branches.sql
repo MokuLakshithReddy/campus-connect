@@ -9,9 +9,13 @@ CREATE TABLE IF NOT EXISTS public.academic_branches (
   course TEXT NOT NULL,
   branch_code TEXT NOT NULL,
   display_name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (course, branch_code)
 );
+
+ALTER TABLE public.academic_branches
+  ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
 
 -- 2. ACADEMIC BRANCH PREFIX CONFIGURATION
 -- Configurable mappings for official roll number prefixes
@@ -185,7 +189,7 @@ BEGIN
     ('B.Tech', 'RAI', 'Robotics and Artificial Intelligence'),
     ('BBA', 'BBA', 'Bachelor of Business Administration'),
     ('M.Tech', 'CSE', 'Master of Technology (Computer Science)'),
-    ('M.Tech', 'VLSI', 'Master of Technology (VLSI & Embedded Systems)')
+    ('M.Tech', 'CSE-AIML', 'Master of Technology (CSE - AI & ML)')
   ON CONFLICT (course, branch_code) DO UPDATE
     SET display_name = EXCLUDED.display_name;
 
@@ -260,6 +264,8 @@ REVOKE EXECUTE ON FUNCTION public.resolve_student_branch(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.resolve_student_branch(TEXT) TO authenticated;
 
 -- 9. RPC: TRUSTED SERVER-SIDE DIRECTORY ACCOUNT SYNCHRONIZATION
+-- Hardened with FOR UPDATE row locking and row-count verification.
+-- Fails closed: raises an exception if another account already owns the directory record.
 CREATE OR REPLACE FUNCTION public.sync_authenticated_student_directory()
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -271,11 +277,13 @@ DECLARE
   v_profile RECORD;
   v_dir RECORD;
   v_branch RECORD;
+  v_rows_updated INT;
 BEGIN
   IF v_user_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
+  -- 1. Load the caller's profile
   SELECT * INTO v_profile FROM public.profiles WHERE id = v_user_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Profile record not found';
@@ -285,24 +293,38 @@ BEGIN
     RETURN jsonb_build_object('linked', false, 'reason', 'No student roll number on profile');
   END IF;
 
-  -- Look up authoritative directory entry
+  -- 2. Lock the directory record with FOR UPDATE to prevent concurrent claiming
   SELECT * INTO v_dir
   FROM public.student_directory
-  WHERE roll_number = upper(trim(v_profile.student_id)) AND is_active = true;
+  WHERE roll_number = upper(trim(v_profile.student_id)) AND is_active = true
+  FOR UPDATE;
 
   IF NOT FOUND THEN
     RETURN jsonb_build_object('linked', false, 'reason', 'Student roll number not found in active directory');
   END IF;
 
-  -- Atomically link directory row to profile
+  -- 3. Check ownership: record must be unclaimed OR already belong to this user
+  IF v_dir.profile_id IS NOT NULL AND v_dir.profile_id != v_user_id THEN
+    RAISE EXCEPTION 'Directory record already linked to another account'
+      USING HINT = 'Contact campus administration if you believe this is an error.';
+  END IF;
+
+  -- 4. Atomically link directory row to this profile and verify exactly 1 row updated
   UPDATE public.student_directory
   SET profile_id = v_user_id
   WHERE roll_number = v_dir.roll_number
     AND (profile_id IS NULL OR profile_id = v_user_id);
 
+  GET DIAGNOSTICS v_rows_updated = ROW_COUNT;
+
+  IF v_rows_updated != 1 THEN
+    RAISE EXCEPTION 'Directory link failed: expected 1 row updated, got %', v_rows_updated
+      USING HINT = 'This may indicate a concurrent claim attempt. Please retry.';
+  END IF;
+
+  -- 5. Only after the directory link succeeds, update the profile
   SELECT * INTO v_branch FROM public.academic_branches WHERE id = v_dir.branch_id;
 
-  -- Update verified profile academic credentials
   UPDATE public.profiles
   SET branch_id = v_dir.branch_id,
       department = v_branch.display_name,
@@ -325,6 +347,8 @@ REVOKE EXECUTE ON FUNCTION public.sync_authenticated_student_directory() FROM PU
 GRANT EXECUTE ON FUNCTION public.sync_authenticated_student_directory() TO authenticated;
 
 -- 10. RPC: CONTROLLED STUDENT DISCOVERY SEARCH (PRIVACY-PRESERVING)
+-- Returns masked roll numbers (last 4 chars only) to protect student identifiers.
+-- Full roll numbers remain searchable but are never exposed in results.
 CREATE OR REPLACE FUNCTION public.search_campus_students(
   p_query TEXT DEFAULT '',
   p_branch_id UUID DEFAULT NULL,
@@ -358,7 +382,12 @@ BEGIN
     p.username,
     p.avatar_url,
     p.department,
-    p.student_id,
+    -- Mask roll number: show only last 4 characters for privacy
+    CASE
+      WHEN p.student_id IS NOT NULL AND length(p.student_id) > 4
+        THEN repeat('*', length(p.student_id) - 4) || right(p.student_id, 4)
+      ELSE p.student_id
+    END AS student_id,
     p.branch_id,
     ab.course,
     ab.branch_code
@@ -422,3 +451,183 @@ CREATE POLICY "Admins can manage student directory"
   FOR ALL TO authenticated
   USING (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin'))
   WITH CHECK (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin'));
+
+-- ============================================================================
+-- 12. CONTENT VISIBILITY / AUDIENCE MODEL
+-- ============================================================================
+-- Distinguishes "who created the content" from "who should see it".
+-- Valid values: 'college' (everyone), 'branch' (author's branch), 'club_members' (club members only).
+
+-- Posts
+ALTER TABLE public.posts
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+
+-- Events
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+
+-- Clubs
+ALTER TABLE public.clubs
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+
+-- Channel messages (announcements)
+ALTER TABLE public.channel_messages
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+
+-- 13. AUTO-POPULATE POST branch_id FROM AUTHOR'S VERIFIED PROFILE
+-- Ensures new posts always carry the author's verified branch_id (if available).
+-- This eliminates reliance on the frontend to set branch_id.
+CREATE OR REPLACE FUNCTION public.auto_set_post_branch_from_author()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_author_branch_id UUID;
+BEGIN
+  -- Only set branch_id if it was not explicitly provided
+  IF NEW.branch_id IS NULL THEN
+    SELECT branch_id INTO v_author_branch_id
+    FROM public.profiles
+    WHERE id = NEW.user_id;
+
+    IF v_author_branch_id IS NOT NULL THEN
+      NEW.branch_id := v_author_branch_id;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_auto_set_post_branch ON public.posts;
+CREATE TRIGGER trg_auto_set_post_branch
+  BEFORE INSERT ON public.posts
+  FOR EACH ROW
+  EXECUTE FUNCTION public.auto_set_post_branch_from_author();
+
+-- 14. AUTHORITATIVE BRANCH_ID ON CLUBS, EVENTS, AND CHANNEL MESSAGES
+ALTER TABLE public.clubs
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
+
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
+
+ALTER TABLE public.channel_messages
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
+
+CREATE INDEX IF NOT EXISTS idx_clubs_branch_id ON public.clubs(branch_id);
+CREATE INDEX IF NOT EXISTS idx_events_branch_id ON public.events(branch_id);
+CREATE INDEX IF NOT EXISTS idx_channel_messages_branch_id ON public.channel_messages(branch_id);
+
+-- Auto-set branch_id from creator/sender triggers
+CREATE OR REPLACE FUNCTION public.auto_set_event_branch_from_creator()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_creator_branch_id UUID;
+BEGIN
+  IF NEW.branch_id IS NULL AND NEW.created_by IS NOT NULL THEN
+    SELECT branch_id INTO v_creator_branch_id
+    FROM public.profiles
+    WHERE id = NEW.created_by;
+
+    IF v_creator_branch_id IS NOT NULL THEN
+      NEW.branch_id := v_creator_branch_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_auto_set_event_branch ON public.events;
+CREATE TRIGGER trg_auto_set_event_branch
+  BEFORE INSERT ON public.events
+  FOR EACH ROW
+  EXECUTE FUNCTION public.auto_set_event_branch_from_creator();
+
+CREATE OR REPLACE FUNCTION public.auto_set_club_branch_from_creator()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_creator_branch_id UUID;
+BEGIN
+  IF NEW.branch_id IS NULL AND NEW.created_by IS NOT NULL THEN
+    SELECT branch_id INTO v_creator_branch_id
+    FROM public.profiles
+    WHERE id = NEW.created_by;
+
+    IF v_creator_branch_id IS NOT NULL THEN
+      NEW.branch_id := v_creator_branch_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_auto_set_club_branch ON public.clubs;
+CREATE TRIGGER trg_auto_set_club_branch
+  BEFORE INSERT ON public.clubs
+  FOR EACH ROW
+  EXECUTE FUNCTION public.auto_set_club_branch_from_creator();
+
+CREATE OR REPLACE FUNCTION public.auto_set_message_branch_from_sender()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_sender_branch_id UUID;
+BEGIN
+  IF NEW.branch_id IS NULL AND NEW.sender_id IS NOT NULL THEN
+    SELECT branch_id INTO v_sender_branch_id
+    FROM public.profiles
+    WHERE id = NEW.sender_id;
+
+    IF v_sender_branch_id IS NOT NULL THEN
+      NEW.branch_id := v_sender_branch_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_auto_set_message_branch ON public.channel_messages;
+CREATE TRIGGER trg_auto_set_message_branch
+  BEFORE INSERT ON public.channel_messages
+  FOR EACH ROW
+  EXECUTE FUNCTION public.auto_set_message_branch_from_sender();
+
+-- Backfill existing events, clubs, and messages
+UPDATE public.events e
+SET branch_id = pr.branch_id
+FROM public.profiles pr
+WHERE e.created_by = pr.id
+  AND e.branch_id IS NULL
+  AND pr.branch_id IS NOT NULL;
+
+UPDATE public.clubs c
+SET branch_id = pr.branch_id
+FROM public.profiles pr
+WHERE c.created_by = pr.id
+  AND c.branch_id IS NULL
+  AND pr.branch_id IS NOT NULL;
+
+UPDATE public.channel_messages m
+SET branch_id = pr.branch_id
+FROM public.profiles pr
+WHERE m.sender_id = pr.id
+  AND m.branch_id IS NULL
+  AND pr.branch_id IS NOT NULL;

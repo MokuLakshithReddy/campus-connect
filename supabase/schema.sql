@@ -1385,9 +1385,13 @@ CREATE TABLE IF NOT EXISTS public.academic_branches (
   course TEXT NOT NULL,
   branch_code TEXT NOT NULL,
   display_name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (course, branch_code)
 );
+
+ALTER TABLE public.academic_branches
+  ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
 
 CREATE TABLE IF NOT EXISTS public.academic_branch_prefixes (
   prefix TEXT PRIMARY KEY,
@@ -1588,38 +1592,58 @@ DECLARE
   v_profile RECORD;
   v_dir RECORD;
   v_branch RECORD;
+  v_rows_updated INT;
 BEGIN
   IF v_user_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
+  -- 1. Load caller's profile
   SELECT * INTO v_profile FROM public.profiles WHERE id = v_user_id;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Profile record not found';
   END IF;
 
-  IF v_profile.student_id IS NULL THEN
+  IF v_profile.student_id IS NULL OR trim(v_profile.student_id) = '' THEN
     RETURN jsonb_build_object('linked', false, 'reason', 'No student roll number on profile');
   END IF;
 
+  -- 2. Lock directory record with FOR UPDATE
   SELECT * INTO v_dir
   FROM public.student_directory
-  WHERE roll_number = upper(trim(v_profile.student_id)) AND is_active = true;
+  WHERE roll_number = upper(trim(v_profile.student_id)) AND is_active = true
+  FOR UPDATE;
 
   IF NOT FOUND THEN
     RETURN jsonb_build_object('linked', false, 'reason', 'Student roll number not found in active directory');
   END IF;
 
+  -- 3. Check ownership: record must be unclaimed OR belong to current user
+  IF v_dir.profile_id IS NOT NULL AND v_dir.profile_id != v_user_id THEN
+    RAISE EXCEPTION 'Directory record already linked to another account'
+      USING HINT = 'Contact campus administration if you believe this is an error.';
+  END IF;
+
+  -- 4. Atomically link directory row to profile and verify exactly 1 row updated
   UPDATE public.student_directory
   SET profile_id = v_user_id
   WHERE roll_number = v_dir.roll_number
     AND (profile_id IS NULL OR profile_id = v_user_id);
 
+  GET DIAGNOSTICS v_rows_updated = ROW_COUNT;
+
+  IF v_rows_updated != 1 THEN
+    RAISE EXCEPTION 'Directory link failed: expected 1 row updated, got %', v_rows_updated
+      USING HINT = 'This may indicate a concurrent claim attempt. Please retry.';
+  END IF;
+
+  -- 5. Only after link succeeds, update profile
   SELECT * INTO v_branch FROM public.academic_branches WHERE id = v_dir.branch_id;
 
   UPDATE public.profiles
   SET branch_id = v_dir.branch_id,
       department = v_branch.display_name,
+      is_verified = true,
       updated_at = NOW()
   WHERE id = v_user_id;
 
@@ -1671,7 +1695,12 @@ BEGIN
     p.username,
     p.avatar_url,
     p.department,
-    p.student_id,
+    -- Mask roll number for student privacy: expose only last 4 digits
+    CASE
+      WHEN p.student_id IS NOT NULL AND length(p.student_id) > 4
+        THEN repeat('*', length(p.student_id) - 4) || right(p.student_id, 4)
+      ELSE p.student_id
+    END AS student_id,
     p.branch_id,
     ab.course,
     ab.branch_code
