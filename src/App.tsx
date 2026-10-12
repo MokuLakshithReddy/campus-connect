@@ -20,12 +20,24 @@ import Chats from "./pages/Chats";
 import ChatConversation from "./pages/ChatConversation";
 import NotFound from "./pages/NotFound";
 import ReleaseUpdateDialog from "@/components/ReleaseUpdateDialog";
+import ErrorBoundary from "@/components/ErrorBoundary";
+import OfflineIndicator from "@/components/OfflineIndicator";
 
 const queryClient = new QueryClient();
 
-// Protected Route Guard: Strictly forces password change if mustChangePassword is true
+const ProfileUnavailable = ({ onRetry, onSignOut }: { onRetry: () => Promise<void>; onSignOut: () => Promise<void> }) => (
+  <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-6 text-center">
+    <p role="alert">Your account profile could not be loaded.</p>
+    <div className="flex gap-3">
+      <button className="rounded-md border px-4 py-2" onClick={() => void onRetry()}>Retry</button>
+      <button className="rounded-md border px-4 py-2" onClick={() => void onSignOut()}>Sign out</button>
+    </div>
+  </div>
+);
+
+// Protected pages require an authenticated user with a loaded profile.
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading, mustChangePassword } = useAuth();
+  const { user, profile, loading, mustChangePassword, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -34,13 +46,14 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (!user) return <Navigate to="/auth" replace />;
+  if (!profile) return <ProfileUnavailable onRetry={refreshProfile} onSignOut={signOut} />;
   if (mustChangePassword) return <Navigate to="/change-password" replace />;
   return <>{children}</>;
 };
 
 // Authenticated users may open this screen for either first-time setup or a voluntary update.
 const ChangePasswordRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading } = useAuth();
+  const { user, profile, loading, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -49,12 +62,13 @@ const ChangePasswordRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (!user) return <Navigate to="/auth" replace />;
+  if (!profile) return <ProfileUnavailable onRetry={refreshProfile} onSignOut={signOut} />;
   return <>{children}</>;
 };
 
 // Unauthenticated Route Guard
 const AuthRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading, mustChangePassword } = useAuth();
+  const { user, profile, loading, mustChangePassword, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
@@ -63,6 +77,7 @@ const AuthRoute = ({ children }: { children: React.ReactNode }) => {
     );
   }
   if (user) {
+    if (!profile) return <ProfileUnavailable onRetry={refreshProfile} onSignOut={signOut} />;
     if (mustChangePassword) return <Navigate to="/change-password" replace />;
     return <Navigate to="/" replace />;
   }
@@ -70,8 +85,10 @@ const AuthRoute = ({ children }: { children: React.ReactNode }) => {
 };
 
 const App = () => (
+  <ErrorBoundary>
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
+      <OfflineIndicator />
       <Toaster />
       <Sonner />
       <BrowserRouter>
@@ -99,6 +116,7 @@ const App = () => (
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>
+  </ErrorBoundary>
 );
 
 export default App;
