@@ -146,8 +146,16 @@ async function runLiveEventsTestSuite() {
       `)
     ]);
 
-    const successes = [attempt1, attempt2].filter(a => a.status === 'fulfilled' && a.value[0]?.res?.success === true);
-    const failures = [attempt1, attempt2].filter(a => a.status === 'rejected' || a.value[0]?.res?.success !== true);
+    const isRegistrationSuccess = (result) =>
+      result.status === "fulfilled" &&
+      result.value?.[0]?.res?.success === true;
+
+    const isRegistrationFailure = (result) =>
+      result.status === "rejected" ||
+      result.value?.[0]?.res?.success !== true;
+
+    const successes = [attempt1, attempt2].filter(isRegistrationSuccess);
+    const failures = [attempt1, attempt2].filter(isRegistrationFailure);
 
     // Direct Database State Verification (checking actual table rows, not just RPC response)
     const eventCheck = await querySql(`SELECT COUNT(*)::int AS count FROM public.event_registrations WHERE event_id = '${eventId}' AND status = 'registered';`);
@@ -163,9 +171,44 @@ async function runLiveEventsTestSuite() {
       throw new Error(`Concurrency race test failed: successes=${successes.length}, failures=${failures.length}, registeredCount=${registeredCount}, capacity=${eventCapacity}`);
     }
 
-    const winnerId = attempt1.status === 'fulfilled' ? student1Id : student2Id;
-    const loserId = attempt1.status === 'fulfilled' ? student2Id : student1Id;
-    const winningReg = attempt1.status === 'fulfilled' ? attempt1.value[0].res : attempt2.value[0].res;
+    const winnerId = isRegistrationSuccess(attempt1) ? student1Id : student2Id;
+    const loserId = winnerId === student1Id ? student2Id : student1Id;
+    const winningReg = isRegistrationSuccess(attempt1) ? attempt1.value[0].res : attempt2.value[0].res;
+    const losingAttempt = isRegistrationSuccess(attempt1) ? attempt2 : attempt1;
+
+    // Verify the losing result specifically reported capacity limit
+    const failureMsg = losingAttempt.status === 'rejected'
+      ? losingAttempt.reason?.message || ''
+      : losingAttempt.value?.[0]?.res?.error || '';
+    if (!/capacity|full|limit|seat/i.test(failureMsg)) {
+      console.warn(`[Notice] Losing attempt rejected with message: '${failureMsg}'`);
+    }
+
+    // Sub-test: Loser launches 2 concurrent retry attempts while capacity is full
+    const [retry1, retry2] = await Promise.allSettled([
+      querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${loserId}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT public.register_for_event('${eventId}') AS res;
+        COMMIT;
+      `),
+      querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${loserId}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT public.register_for_event('${eventId}') AS res;
+        COMMIT;
+      `)
+    ]);
+
+    const retrySuccesses = [retry1, retry2].filter(isRegistrationSuccess);
+    const retryFailures = [retry1, retry2].filter(isRegistrationFailure);
+    if (retrySuccesses.length !== 0 || retryFailures.length !== 2) {
+      throw new Error(`Concurrent retry erroneously claimed seat when capacity is full! successes=${retrySuccesses.length}, failures=${retryFailures.length}`);
+    }
 
     // =========================================================================
     // TEST 2: Repeated Request Idempotency (Duplicate Registration Prevention)
@@ -389,8 +432,8 @@ async function runLiveEventsTestSuite() {
       `)
     ]);
 
-    const reclaimSuccesses = [reclaim1, reclaim2].filter(r => r.status === 'fulfilled' && r.value[0]?.res?.success === true);
-    const reclaimFailures = [reclaim1, reclaim2].filter(r => r.status === 'rejected');
+    const reclaimSuccesses = [reclaim1, reclaim2].filter(isRegistrationSuccess);
+    const reclaimFailures = [reclaim1, reclaim2].filter(isRegistrationFailure);
 
     // Direct DB state verification: registration count must be exactly 1, capacity 1
     const finalCountRes = await querySql(`SELECT COUNT(*)::int AS count FROM public.event_registrations WHERE event_id = '${eventId}' AND status = 'registered';`);

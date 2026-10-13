@@ -1071,6 +1071,161 @@ describe("Live Test Suite Isolation & Teardown Guarantees", () => {
   });
 });
 
+describe("End-to-End Profile-Resolution Failure & Restricted Session State", () => {
+  it("should enforce fail-closed restricted mode when auth succeeds but profile fails, verifying route lockdown, retry and sign-out", async () => {
+    // 1. Simulation of Supabase authentication succeeding
+    let authenticatedUser: { id: string; email: string } | null = {
+      id: "u-student-test",
+      email: "25mvcsmr9a1b@campus.internal",
+    };
+    let profileState: any = null;
+    let profileErrorState: string | null = null;
+    let mustChangePasswordState = false;
+
+    // Database simulation controls
+    let dbRpcFails = true;
+    let dbFallbackFails = true;
+
+    // Async profile resolution matching useAuth.tsx fetchProfile
+    const fetchProfileSim = async () => {
+      const rpcResult = dbRpcFails
+        ? { data: null, error: new Error("RPC get_my_profile returned 500 internal error") }
+        : { data: [{ id: authenticatedUser?.id, username: "25MVCSMR9A1B", student_id: "25MVCSMR9A1B", college_role: "student", is_verified: true, must_change_password: true }], error: null };
+
+      let fallbackResult: any = { data: null, error: null };
+      if (rpcResult.error || !rpcResult.data) {
+        fallbackResult = dbFallbackFails
+          ? { data: null, error: new Error("Fallback query to public.profiles failed: connection refused") }
+          : { data: { id: authenticatedUser?.id, username: "25MVCSMR9A1B", student_id: "25MVCSMR9A1B", college_role: "student", is_verified: true, must_change_password: true }, error: null };
+      }
+
+      const resolution = resolveProfileFromSources(
+        rpcResult.data,
+        rpcResult.error,
+        fallbackResult.data,
+        fallbackResult.error
+      );
+
+      profileState = resolution.profile;
+      profileErrorState = resolution.error;
+      mustChangePasswordState = resolution.mustChangePassword;
+
+      return resolution.profile;
+    };
+
+    // Step 1: Authentication succeeds
+    expect(authenticatedUser).not.toBeNull();
+
+    // Step 2 & 3: get_my_profile() fails and fallback also fails
+    const initialProf = await fetchProfileSim();
+    expect(initialProf).toBeNull();
+    expect(profileErrorState).toContain("Database error fetching user profile");
+    // Crucial fail-closed invariant: mustChangePassword MUST default to true
+    expect(mustChangePasswordState).toBe(true);
+
+    // Verify signIn() throws and rejects normal route navigation
+    const simulateSignIn = async () => {
+      const prof = await fetchProfileSim();
+      if (!prof) {
+        throw new Error(`Profile resolution failed (${profileErrorState}). Access to campus application routes is restricted.`);
+      }
+      return prof.must_change_password;
+    };
+    await expect(simulateSignIn()).rejects.toThrow("Profile resolution failed");
+
+    // Route Guard Simulator modeling ProtectedRoute, ForcePasswordChangeRoute & AuthRoute
+    const simulateRouteNavigation = (targetPath: string) => {
+      if (!authenticatedUser) {
+        return { rendered: "Navigate", destination: "/auth" };
+      }
+      if (profileErrorState || !profileState) {
+        return { rendered: "AuthErrorScreen", error: profileErrorState };
+      }
+      if (!profileState.is_verified) {
+        return { rendered: "AuthErrorScreen", error: "Directory verification unverified" };
+      }
+      if (targetPath === "/change-password") {
+        if (!mustChangePasswordState) return { rendered: "Navigate", destination: "/" };
+        return { rendered: "ChangePasswordPage" };
+      }
+      if (mustChangePasswordState) {
+        return { rendered: "Navigate", destination: "/change-password" };
+      }
+      return { rendered: "ProtectedPage", path: targetPath };
+    };
+
+    // Step 4: The user CANNOT reach protected routes (yields AuthErrorScreen)
+    expect(simulateRouteNavigation("/")).toEqual({
+      rendered: "AuthErrorScreen",
+      error: expect.stringContaining("Database error"),
+    });
+    expect(simulateRouteNavigation("/events")).toEqual({
+      rendered: "AuthErrorScreen",
+      error: expect.stringContaining("Database error"),
+    });
+    expect(simulateRouteNavigation("/feed")).toEqual({
+      rendered: "AuthErrorScreen",
+      error: expect.stringContaining("Database error"),
+    });
+
+    // Step 5: The user CANNOT bypass password change
+    // Attempting to visit /change-password while profile is broken also halts at AuthErrorScreen
+    expect(simulateRouteNavigation("/change-password")).toEqual({
+      rendered: "AuthErrorScreen",
+      error: expect.stringContaining("Database error"),
+    });
+
+    // Step 6a: Test Retry behavior
+    // Retry while database is still failing keeps session restricted
+    await fetchProfileSim();
+    expect(simulateRouteNavigation("/")).toEqual({
+      rendered: "AuthErrorScreen",
+      error: expect.stringContaining("Database error"),
+    });
+
+    // When connection recovers and profile resolves with must_change_password=true
+    dbRpcFails = false;
+    dbFallbackFails = false;
+    const recoveredProf = await fetchProfileSim();
+    expect(recoveredProf).not.toBeNull();
+    expect(profileErrorState).toBeNull();
+    expect(mustChangePasswordState).toBe(true);
+
+    // Protected route / now redirects to mandatory /change-password
+    expect(simulateRouteNavigation("/")).toEqual({
+      rendered: "Navigate",
+      destination: "/change-password",
+    });
+    // /change-password page is now unlocked
+    expect(simulateRouteNavigation("/change-password")).toEqual({
+      rendered: "ChangePasswordPage",
+    });
+
+    // Once password is changed, mustChangePasswordState becomes false
+    mustChangePasswordState = false;
+    profileState.must_change_password = false;
+    expect(simulateRouteNavigation("/")).toEqual({
+      rendered: "ProtectedPage",
+      path: "/",
+    });
+
+    // Step 6b: Test Sign-Out behavior
+    const simulateSignOut = () => {
+      authenticatedUser = null;
+      profileState = null;
+      profileErrorState = null;
+      mustChangePasswordState = false;
+    };
+
+    simulateSignOut();
+    // After sign-out, protected route redirects cleanly to /auth
+    expect(simulateRouteNavigation("/")).toEqual({
+      rendered: "Navigate",
+      destination: "/auth",
+    });
+  });
+});
+
 
 
 

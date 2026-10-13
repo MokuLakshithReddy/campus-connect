@@ -1,0 +1,83 @@
+name: Staging Environment Live Security Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_project_ref:
+        description: 'Dedicated staging Supabase project reference (must NOT be production)'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      staging_project_ref:
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  verify-staging:
+    name: Execute Live Supabase Security Suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Pre-Flight Staging Configuration & Safety Validation
+        env:
+          INPUT_REF: ${{ inputs.staging_project_ref }}
+          SECRET_REF: ${{ secrets.TEST_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_ID }}
+          KNOWN_PROD: 'gtkvujspajcelzufpggr'
+        run: |
+          TARGET_REF="${INPUT_REF:-$SECRET_REF}"
+          echo "Inspecting target staging project reference..."
+
+          if [ -z "$TARGET_REF" ] || [ "$TARGET_REF" = "staging-campusconnect" ] || [ "$TARGET_REF" = "placeholder" ]; then
+            echo "::error::CRITICAL CONFIGURATION ERROR: No real staging project reference configured."
+            echo "Placeholder values ('staging-campusconnect') are rejected. Please configure TEST_SUPABASE_PROJECT_REF in repository secrets or workflow inputs."
+            exit 1
+          fi
+
+          if [ "$TARGET_REF" = "$KNOWN_PROD" ]; then
+            echo "::error::FATAL SAFETY GUARD ACTIVE: Target project matches production ($KNOWN_PROD)."
+            echo "Mutating live test suites are strictly prohibited from targeting the production database."
+            exit 1
+          fi
+
+          echo "TARGET_REF=${TARGET_REF}" >> "$GITHUB_ENV"
+          echo "Target staging reference confirmed: ${TARGET_REF}"
+
+      - name: Run Live Password Lifecycle & First-Time Setup Suite
+        env:
+          TEST_SUPABASE_PROJECT_REF: ${{ env.TARGET_REF }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+          TEST_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.TEST_SUPABASE_PUBLISHABLE_KEY || secrets.STAGING_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          echo "Executing scripts/test_full_password_flow.cjs against staging project $TEST_SUPABASE_PROJECT_REF..."
+          node scripts/test_full_password_flow.cjs
+
+      - name: Run Staging Sessions & RLS Policy Smoke Suite
+        env:
+          TEST_SUPABASE_PROJECT_REF: ${{ env.TARGET_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.TEST_SUPABASE_MANAGEMENT_TOKEN || secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          echo "Executing scripts/test_staging_sessions_smoke.cjs against staging project $TEST_SUPABASE_PROJECT_REF..."
+          node scripts/test_staging_sessions_smoke.cjs
+
+      - name: Run Event Concurrency & QR Attendance Suite
+        env:
+          TEST_SUPABASE_PROJECT_REF: ${{ env.TARGET_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.TEST_SUPABASE_MANAGEMENT_TOKEN || secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          echo "Executing scripts/test_live_events_and_qr_checkin.cjs against staging project $TEST_SUPABASE_PROJECT_REF..."
+          node scripts/test_live_events_and_qr_checkin.cjs
