@@ -197,10 +197,10 @@ async function resetPublicSchema(client) {
   await client.query(`
     DROP SCHEMA IF EXISTS public CASCADE;
     CREATE SCHEMA public;
-    GRANT ALL ON SCHEMA public TO postgres;
-    GRANT USAGE, CREATE ON SCHEMA public TO public;
-    GRANT USAGE, CREATE ON SCHEMA public TO authenticated;
-    GRANT USAGE, CREATE ON SCHEMA public TO anon;
+    GRANT ALL ON SCHEMA public TO postgres, authenticated, anon, service_role, public;
+    ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO postgres, anon, authenticated, service_role;
+    ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO postgres, anon, authenticated, service_role;
+    ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, anon, authenticated, service_role;
     CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
     CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
   `);

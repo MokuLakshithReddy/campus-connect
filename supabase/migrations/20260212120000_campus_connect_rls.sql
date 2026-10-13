@@ -2,7 +2,15 @@
 -- CAMPUSCONNECT ROW LEVEL SECURITY (RLS) POLICIES
 -- ============================================================================
 
--- 1. ENABLE RLS ON ALL TABLES
+-- 1. ENABLE RLS ON ALL TABLES AND GRANT BASE SUPABASE ROLES
+GRANT USAGE ON SCHEMA public TO postgres, authenticated, anon, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, authenticated, anon, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, authenticated, anon, service_role;
+GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, authenticated, anon, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO postgres, authenticated, anon, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, authenticated, anon, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO postgres, authenticated, anon, service_role;
+
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.clubs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.club_memberships ENABLE ROW LEVEL SECURITY;

@@ -725,7 +725,7 @@ REVOKE ALL ON public.student_directory FROM anon;
 
 GRANT SELECT ON public.academic_branches TO authenticated;
 GRANT SELECT ON public.academic_branch_prefixes TO authenticated;
-GRANT SELECT ON public.student_directory TO authenticated;
+GRANT ALL ON public.student_directory TO authenticated;
 
 DROP POLICY IF EXISTS "Academic branches viewable by authenticated users" ON public.academic_branches;
 CREATE POLICY "Academic branches viewable by authenticated users"
