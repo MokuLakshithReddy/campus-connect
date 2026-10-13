@@ -13,6 +13,21 @@ jobs:
     name: Lint, Typecheck, Test & Build
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -34,6 +49,11 @@ jobs:
 
       - name: Run Test Suite
         run: npm test
+
+      - name: PostgreSQL Integration Tests (Clean DB & Security Verification)
+        env:
+          DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/postgres"
+        run: npm run test:db
 
       - name: Production Build
         env:

@@ -53,41 +53,64 @@ CREATE INDEX IF NOT EXISTS idx_student_directory_active_branch
 CREATE INDEX IF NOT EXISTS idx_student_directory_profile
   ON public.student_directory(profile_id);
 
--- 4. ASSOCIATE BRANCHES WITH PROFILES AND POSTS
+-- 4. ASSOCIATE BRANCHES & CONTENT VISIBILITY WITH ENTITIES
 ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
 
 CREATE INDEX IF NOT EXISTS idx_profiles_branch_id
   ON public.profiles(branch_id);
 
+-- Posts
 ALTER TABLE public.posts
-  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id),
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
 
 CREATE INDEX IF NOT EXISTS idx_posts_branch_id
   ON public.posts(branch_id);
 
--- Backfill existing posts from author profiles
-UPDATE public.posts p
-SET branch_id = pr.branch_id
-FROM public.profiles pr
-WHERE p.user_id = pr.id
-  AND p.branch_id IS NULL
-  AND pr.branch_id IS NOT NULL;
+-- Events
+ALTER TABLE public.events
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id),
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+
+CREATE INDEX IF NOT EXISTS idx_events_branch_id
+  ON public.events(branch_id);
+
+-- Clubs
+ALTER TABLE public.clubs
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id),
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+
+CREATE INDEX IF NOT EXISTS idx_clubs_branch_id
+  ON public.clubs(branch_id);
+
+-- Channel messages (announcements)
+ALTER TABLE public.channel_messages
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id),
+  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
+  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+
+CREATE INDEX IF NOT EXISTS idx_channel_messages_branch_id
+  ON public.channel_messages(branch_id);
 
 -- 5. VALIDATION TRIGGER: LITERAL PREFIX MATCHING WITH LONGEST-PREFIX PRECEDENCE
+-- Hardened with SET search_path = '' and explicit schema qualification.
 CREATE OR REPLACE FUNCTION public.validate_student_directory_prefix()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   v_matching_prefix RECORD;
 BEGIN
   -- Normalize roll number
-  NEW.roll_number := upper(trim(NEW.roll_number));
+  NEW.roll_number := pg_catalog.upper(pg_catalog.btrim(NEW.roll_number));
 
-  IF length(NEW.roll_number) != 12 THEN
+  IF pg_catalog.length(NEW.roll_number) != 12 THEN
     RAISE EXCEPTION 'Roll number must be exactly 12 characters';
   END IF;
 
@@ -95,8 +118,8 @@ BEGIN
   -- Deterministic longest-prefix rule resolves any overlapping configurations
   SELECT prefix, branch_id, admission_year INTO v_matching_prefix
   FROM public.academic_branch_prefixes
-  WHERE left(NEW.roll_number, length(prefix)) = prefix AND is_active = true
-  ORDER BY length(prefix) DESC, prefix ASC
+  WHERE pg_catalog.left(NEW.roll_number, pg_catalog.length(prefix)) = prefix AND is_active = true
+  ORDER BY pg_catalog.length(prefix) DESC, prefix ASC
   LIMIT 1;
 
   IF NOT FOUND THEN
@@ -121,12 +144,16 @@ CREATE TRIGGER trg_validate_student_directory_prefix
   FOR EACH ROW
   EXECUTE FUNCTION public.validate_student_directory_prefix();
 
+REVOKE ALL ON FUNCTION public.validate_student_directory_prefix() FROM PUBLIC;
+
 -- 6. PROFILE ACADEMIC INTEGRITY & ROLE ESCALATION PROTECTION TRIGGER
+-- Hardened with SET search_path = '' and covers BOTH INSERT and UPDATE.
+-- Ensures no caller can self-grant college_admin or tamper with verified academic fields.
 CREATE OR REPLACE FUNCTION public.protect_profile_academic_fields()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   v_caller_id UUID := auth.uid();
@@ -138,22 +165,37 @@ BEGIN
     WHERE id = v_caller_id;
   END IF;
 
-  -- Non-admins cannot alter verified academic fields or self-escalate college_role
-  IF NOT COALESCE(v_is_admin, false) THEN
-    IF OLD.student_id IS NOT NULL AND NEW.student_id IS DISTINCT FROM OLD.student_id THEN
-      RAISE EXCEPTION 'Unauthorized: Student roll number cannot be modified';
+  -- ENFORCE ON INSERT: Ordinary users or new signups cannot self-grant college_admin or pre-verify
+  IF TG_OP = 'INSERT' THEN
+    IF NOT COALESCE(v_is_admin, false) THEN
+      NEW.college_role := 'student';
+      NEW.is_verified := false;
+      NEW.must_change_password := true;
+      NEW.branch_id := NULL;
     END IF;
+    RETURN NEW;
+  END IF;
 
-    IF OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
-      RAISE EXCEPTION 'Unauthorized: Academic branch cannot be modified by student';
-    END IF;
+  -- ENFORCE ON UPDATE: Non-admins cannot alter verified academic fields, branch, or self-escalate role
+  IF TG_OP = 'UPDATE' THEN
+    IF NOT COALESCE(v_is_admin, false) THEN
+      IF OLD.student_id IS NOT NULL AND NEW.student_id IS DISTINCT FROM OLD.student_id THEN
+        RAISE EXCEPTION 'Unauthorized: Student roll number cannot be modified';
+      END IF;
 
-    IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
-      RAISE EXCEPTION 'Unauthorized: College role cannot be self-modified';
-    END IF;
+      IF OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
+        RAISE EXCEPTION 'Unauthorized: Academic branch cannot be modified by student';
+      END IF;
 
-    IF OLD.is_verified IS TRUE AND NEW.is_verified IS NOT TRUE THEN
-      RAISE EXCEPTION 'Unauthorized: Verified status cannot be altered';
+      IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
+        RAISE EXCEPTION 'Unauthorized: College role cannot be self-modified';
+      END IF;
+
+      IF NEW.is_verified IS DISTINCT FROM OLD.is_verified THEN
+        IF pg_catalog.current_setting('app.internal_directory_sync', true) IS DISTINCT FROM 'true' THEN
+          RAISE EXCEPTION 'Unauthorized: Only college admins can modify verification status';
+        END IF;
+      END IF;
     END IF;
   END IF;
 
@@ -161,37 +203,43 @@ BEGIN
 END;
 $$;
 
+-- Drop legacy trigger that blocked directory sync
+DROP TRIGGER IF EXISTS trg_protect_profile_privileges ON public.profiles;
+
 DROP TRIGGER IF EXISTS trg_protect_profile_academic_fields ON public.profiles;
 CREATE TRIGGER trg_protect_profile_academic_fields
-  BEFORE UPDATE ON public.profiles
+  BEFORE INSERT OR UPDATE ON public.profiles
   FOR EACH ROW
   EXECUTE FUNCTION public.protect_profile_academic_fields();
 
+REVOKE ALL ON FUNCTION public.protect_profile_academic_fields() FROM PUBLIC;
+
 -- 7. SEED ACADEMIC BRANCHES & CONFIRMED PREFIXES
--- Inserts all official listed branches; activates only verified 2025 prefixes
+-- Inserts all 13 official listed branches; activates confirmed 2025 prefixes
 DO $$
 DECLARE
   v_aiml_id UUID;
   v_cse_id UUID;
 BEGIN
   -- Insert all 13 official academic branches
-  INSERT INTO public.academic_branches (course, branch_code, display_name)
+  INSERT INTO public.academic_branches (course, branch_code, display_name, is_active)
   VALUES
-    ('B.Tech', 'CSE-AIML', 'Computer Science and Engineering (AI & ML)'),
-    ('B.Tech', 'CSE', 'Computer Science and Engineering'),
-    ('B.Tech', 'CSE-DS', 'Computer Science and Engineering (Data Science)'),
-    ('B.Tech', 'CSE-AI', 'Computer Science and Engineering (Artificial Intelligence)'),
-    ('B.Tech', 'CSE-AIDS', 'Computer Science and Engineering (AI & Data Science)'),
-    ('B.Tech', 'CSE-CS', 'Computer Science and Engineering (Cyber Security)'),
-    ('B.Tech', 'CSIT', 'Computer Science and Information Technology'),
-    ('B.Tech', 'ECE', 'Electronics and Communication Engineering'),
-    ('B.Tech', 'CSE-ICB', 'Computer Science and Engineering (IoT & Cyber Security including Blockchain)'),
-    ('B.Tech', 'RAI', 'Robotics and Artificial Intelligence'),
-    ('BBA', 'BBA', 'Bachelor of Business Administration'),
-    ('M.Tech', 'CSE', 'Master of Technology (Computer Science)'),
-    ('M.Tech', 'CSE-AIML', 'Master of Technology (CSE - AI & ML)')
+    ('B.Tech', 'CSE-AIML', 'Computer Science and Engineering (AI & ML)', true),
+    ('B.Tech', 'CSE', 'Computer Science and Engineering', true),
+    ('B.Tech', 'CSE-DS', 'Computer Science and Engineering (Data Science)', true),
+    ('B.Tech', 'CSE-AI', 'Computer Science and Engineering (Artificial Intelligence)', true),
+    ('B.Tech', 'CSE-AIDS', 'Computer Science and Engineering (AI & Data Science)', true),
+    ('B.Tech', 'CSE-CS', 'Computer Science and Engineering (Cyber Security)', true),
+    ('B.Tech', 'CSIT', 'Computer Science and Information Technology', true),
+    ('B.Tech', 'ECE', 'Electronics and Communication Engineering', true),
+    ('B.Tech', 'CSE-ICB', 'Computer Science and Engineering (IoT & Cyber Security including Blockchain)', true),
+    ('B.Tech', 'RAI', 'Robotics and Artificial Intelligence', true),
+    ('BBA', 'BBA', 'Bachelor of Business Administration', true),
+    ('M.Tech', 'CSE', 'Master of Technology (Computer Science)', true),
+    ('M.Tech', 'CSE-AIML', 'Master of Technology (CSE - AI & ML)', true)
   ON CONFLICT (course, branch_code) DO UPDATE
-    SET display_name = EXCLUDED.display_name;
+    SET display_name = EXCLUDED.display_name,
+        is_active = EXCLUDED.is_active;
 
   SELECT id INTO v_aiml_id FROM public.academic_branches WHERE course = 'B.Tech' AND branch_code = 'CSE-AIML';
   SELECT id INTO v_cse_id FROM public.academic_branches WHERE course = 'B.Tech' AND branch_code = 'CSE';
@@ -213,18 +261,19 @@ BEGIN
 END $$;
 
 -- 8. RPC: RESOLVE STUDENT BRANCH (LITERAL PREFIX MATCH WITH LONGEST-PREFIX RULE)
+-- Hardened with SET search_path = '' and explicit schema qualification.
 CREATE OR REPLACE FUNCTION public.resolve_student_branch(p_roll_number TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
-  v_clean_roll TEXT := upper(trim(p_roll_number));
+  v_clean_roll TEXT := pg_catalog.upper(pg_catalog.btrim(p_roll_number));
   v_result RECORD;
 BEGIN
-  IF length(v_clean_roll) != 12 THEN
-    RETURN jsonb_build_object('success', false, 'error', 'Roll number must be exactly 12 characters');
+  IF pg_catalog.length(v_clean_roll) != 12 THEN
+    RETURN pg_catalog.jsonb_build_object('success', false, 'error', 'Roll number must be exactly 12 characters');
   END IF;
 
   SELECT 
@@ -237,18 +286,18 @@ BEGIN
   INTO v_result
   FROM public.academic_branch_prefixes abp
   JOIN public.academic_branches ab ON ab.id = abp.branch_id
-  WHERE left(v_clean_roll, length(abp.prefix)) = abp.prefix AND abp.is_active = true
-  ORDER BY length(abp.prefix) DESC, abp.prefix ASC
+  WHERE pg_catalog.left(v_clean_roll, pg_catalog.length(abp.prefix)) = abp.prefix AND abp.is_active = true
+  ORDER BY pg_catalog.length(abp.prefix) DESC, abp.prefix ASC
   LIMIT 1;
 
   IF NOT FOUND THEN
-    RETURN jsonb_build_object(
+    RETURN pg_catalog.jsonb_build_object(
       'success', false,
       'error', 'Roll number prefix is not configured in the academic directory'
     );
   END IF;
 
-  RETURN jsonb_build_object(
+  RETURN pg_catalog.jsonb_build_object(
     'success', true,
     'branch_id', v_result.branch_id,
     'course', v_result.course,
@@ -260,17 +309,21 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.resolve_student_branch(TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.resolve_student_branch(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.resolve_student_branch(TEXT) TO authenticated;
 
 -- 9. RPC: TRUSTED SERVER-SIDE DIRECTORY ACCOUNT SYNCHRONIZATION
--- Hardened with FOR UPDATE row locking and row-count verification.
--- Fails closed: raises an exception if another account already owns the directory record.
+-- Hardened with:
+-- (1) SET search_path = ''
+-- (2) SELECT FOR UPDATE row locking
+-- (3) Ownership check against conflicting claims
+-- (4) GET DIAGNOSTICS ROW_COUNT verification
+-- (5) Sets is_verified = true upon successful linking
 CREATE OR REPLACE FUNCTION public.sync_authenticated_student_directory()
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   v_user_id UUID := auth.uid();
@@ -289,18 +342,18 @@ BEGIN
     RAISE EXCEPTION 'Profile record not found';
   END IF;
 
-  IF v_profile.student_id IS NULL THEN
-    RETURN jsonb_build_object('linked', false, 'reason', 'No student roll number on profile');
+  IF v_profile.student_id IS NULL OR pg_catalog.btrim(v_profile.student_id) = '' THEN
+    RETURN pg_catalog.jsonb_build_object('linked', false, 'reason', 'No student roll number on profile');
   END IF;
 
   -- 2. Lock the directory record with FOR UPDATE to prevent concurrent claiming
   SELECT * INTO v_dir
   FROM public.student_directory
-  WHERE roll_number = upper(trim(v_profile.student_id)) AND is_active = true
+  WHERE roll_number = pg_catalog.upper(pg_catalog.btrim(v_profile.student_id)) AND is_active = true
   FOR UPDATE;
 
   IF NOT FOUND THEN
-    RETURN jsonb_build_object('linked', false, 'reason', 'Student roll number not found in active directory');
+    RETURN pg_catalog.jsonb_build_object('linked', false, 'reason', 'Student roll number not found in active directory');
   END IF;
 
   -- 3. Check ownership: record must be unclaimed OR already belong to this user
@@ -322,16 +375,20 @@ BEGIN
       USING HINT = 'This may indicate a concurrent claim attempt. Please retry.';
   END IF;
 
-  -- 5. Only after the directory link succeeds, update the profile
+  -- 5. Only after the directory link succeeds, update the profile with verified status
   SELECT * INTO v_branch FROM public.academic_branches WHERE id = v_dir.branch_id;
+
+  -- Set transaction-local authorization flag allowing is_verified update
+  PERFORM pg_catalog.set_config('app.internal_directory_sync', 'true', true);
 
   UPDATE public.profiles
   SET branch_id = v_dir.branch_id,
       department = v_branch.display_name,
-      updated_at = NOW()
+      is_verified = true,
+      updated_at = pg_catalog.now()
   WHERE id = v_user_id;
 
-  RETURN jsonb_build_object(
+  RETURN pg_catalog.jsonb_build_object(
     'linked', true,
     'roll_number', v_dir.roll_number,
     'branch_id', v_dir.branch_id,
@@ -343,12 +400,11 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.sync_authenticated_student_directory() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.sync_authenticated_student_directory() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.sync_authenticated_student_directory() TO authenticated;
 
 -- 10. RPC: CONTROLLED STUDENT DISCOVERY SEARCH (PRIVACY-PRESERVING)
--- Returns masked roll numbers (last 4 chars only) to protect student identifiers.
--- Full roll numbers remain searchable but are never exposed in results.
+-- Hardened with SET search_path = '' and masks roll numbers (exposes only last 4 chars).
 CREATE OR REPLACE FUNCTION public.search_campus_students(
   p_query TEXT DEFAULT '',
   p_branch_id UUID DEFAULT NULL,
@@ -367,10 +423,10 @@ RETURNS TABLE(
 LANGUAGE plpgsql
 SECURITY DEFINER
 STABLE
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
-  v_sanitized TEXT := trim(COALESCE(p_query, ''));
+  v_sanitized TEXT := pg_catalog.btrim(COALESCE(p_query, ''));
 BEGIN
   IF auth.uid() IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
@@ -384,8 +440,8 @@ BEGIN
     p.department,
     -- Mask roll number: show only last 4 characters for privacy
     CASE
-      WHEN p.student_id IS NOT NULL AND length(p.student_id) > 4
-        THEN repeat('*', length(p.student_id) - 4) || right(p.student_id, 4)
+      WHEN p.student_id IS NOT NULL AND pg_catalog.length(p.student_id) > 4
+        THEN pg_catalog.repeat('*', pg_catalog.length(p.student_id) - 4) || pg_catalog.right(p.student_id, 4)
       ELSE p.student_id
     END AS student_id,
     p.branch_id,
@@ -404,10 +460,10 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.search_campus_students(TEXT, UUID, INT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.search_campus_students(TEXT, UUID, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.search_campus_students(TEXT, UUID, INT) TO authenticated;
 
--- 11. STRICT ROW LEVEL SECURITY (RLS)
+-- 11. STRICT ROW LEVEL SECURITY (RLS) FOR REGISTRIES
 ALTER TABLE public.academic_branches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.academic_branch_prefixes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.student_directory ENABLE ROW LEVEL SECURITY;
@@ -433,7 +489,6 @@ CREATE POLICY "Prefixes viewable by authenticated users"
   USING (true);
 
 -- Student directory privacy: students can ONLY read their own linked enrollment record
--- Administrators can view all directory rows for verification & operations
 DROP POLICY IF EXISTS "Active directory records viewable by authenticated users" ON public.student_directory;
 DROP POLICY IF EXISTS "Students view own directory record" ON public.student_directory;
 CREATE POLICY "Students view own directory record"
@@ -452,45 +507,91 @@ CREATE POLICY "Admins can manage student directory"
   USING (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin'))
   WITH CHECK (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin'));
 
--- ============================================================================
--- 12. CONTENT VISIBILITY / AUDIENCE MODEL
--- ============================================================================
--- Distinguishes "who created the content" from "who should see it".
--- Valid values: 'college' (everyone), 'branch' (author's branch), 'club_members' (club members only).
+-- 12. DATABASE-LEVEL CONTENT AUDIENCE AND VISIBILITY RLS POLICIES
+-- Enforces college vs branch vs club_members visibility directly in PostgreSQL.
 
--- Posts
-ALTER TABLE public.posts
-  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
-  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+-- A. POSTS AUDIENCE POLICY
+DROP POLICY IF EXISTS "Anyone can view posts" ON public.posts;
+DROP POLICY IF EXISTS "Authenticated users view posts" ON public.posts;
+DROP POLICY IF EXISTS "Audience can view posts" ON public.posts;
+CREATE POLICY "Audience can view posts" ON public.posts
+  FOR SELECT TO authenticated
+  USING (
+    user_id = auth.uid() OR
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin') OR
+    content_visibility = 'college' OR
+    (content_visibility = 'branch' AND branch_id IS NOT NULL AND branch_id = (SELECT p.branch_id FROM public.profiles p WHERE p.id = auth.uid()))
+  );
 
--- Events
-ALTER TABLE public.events
-  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
-  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+-- B. EVENTS AUDIENCE POLICY
+DROP POLICY IF EXISTS "View published events or club organizers" ON public.events;
+DROP POLICY IF EXISTS "Audience can view events" ON public.events;
+CREATE POLICY "Audience can view events" ON public.events
+  FOR SELECT TO authenticated
+  USING (
+    created_by = auth.uid() OR
+    public.is_club_organizer_or_admin(club_id, auth.uid()) OR
+    (is_published = true AND (
+      content_visibility = 'college' OR
+      (content_visibility = 'branch' AND branch_id IS NOT NULL AND branch_id = (SELECT p.branch_id FROM public.profiles p WHERE p.id = auth.uid())) OR
+      (content_visibility = 'club_members' AND EXISTS (
+        SELECT 1 FROM public.club_memberships cm WHERE cm.club_id = events.club_id AND cm.user_id = auth.uid() AND cm.status = 'active'
+      ))
+    ))
+  );
 
--- Clubs
-ALTER TABLE public.clubs
-  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
-  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+-- C. CLUBS AUDIENCE POLICY
+DROP POLICY IF EXISTS "View active clubs or own proposals" ON public.clubs;
+DROP POLICY IF EXISTS "Audience can view clubs" ON public.clubs;
+CREATE POLICY "Audience can view clubs" ON public.clubs
+  FOR SELECT TO authenticated
+  USING (
+    created_by = auth.uid() OR
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin') OR
+    (status = 'active' AND (
+      content_visibility = 'college' OR
+      (content_visibility = 'branch' AND branch_id IS NOT NULL AND branch_id = (SELECT p.branch_id FROM public.profiles p WHERE p.id = auth.uid())) OR
+      EXISTS (
+        SELECT 1 FROM public.club_memberships cm WHERE cm.club_id = clubs.id AND cm.user_id = auth.uid() AND cm.status = 'active'
+      )
+    ))
+  );
 
--- Channel messages (announcements)
-ALTER TABLE public.channel_messages
-  ADD COLUMN IF NOT EXISTS content_visibility TEXT NOT NULL DEFAULT 'college'
-  CHECK (content_visibility IN ('college', 'branch', 'club_members'));
+-- D. CHANNEL MESSAGES AUDIENCE POLICY (ANNOUNCEMENTS & DISCUSSIONS)
+DROP POLICY IF EXISTS "Active members view messages" ON public.channel_messages;
+DROP POLICY IF EXISTS "Audience can view channel messages" ON public.channel_messages;
+CREATE POLICY "Audience can view channel messages" ON public.channel_messages
+  FOR SELECT TO authenticated
+  USING (
+    sender_id = auth.uid() OR
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin') OR
+    -- Active club members can view messages in their club channels
+    EXISTS (
+      SELECT 1 FROM public.club_channels cc
+      JOIN public.club_memberships cm ON cm.club_id = cc.club_id
+      WHERE cc.id = channel_messages.channel_id AND cm.user_id = auth.uid() AND cm.status = 'active'
+    ) OR
+    -- Non-members can view public announcements according to visibility scope
+    (EXISTS (
+      SELECT 1 FROM public.club_channels cc
+      WHERE cc.id = channel_messages.channel_id AND cc.type = 'announcements'
+    ) AND (
+      content_visibility = 'college' OR
+      (content_visibility = 'branch' AND branch_id IS NOT NULL AND branch_id = (SELECT p.branch_id FROM public.profiles p WHERE p.id = auth.uid()))
+    ))
+  );
 
--- 13. AUTO-POPULATE POST branch_id FROM AUTHOR'S VERIFIED PROFILE
--- Ensures new posts always carry the author's verified branch_id (if available).
--- This eliminates reliance on the frontend to set branch_id.
+-- 13. AUTO-POPULATE branch_id TRIGGERS FROM CREATOR/AUTHOR
+-- Ensures new posts, events, clubs, and messages automatically inherit the author's branch_id.
 CREATE OR REPLACE FUNCTION public.auto_set_post_branch_from_author()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   v_author_branch_id UUID;
 BEGIN
-  -- Only set branch_id if it was not explicitly provided
   IF NEW.branch_id IS NULL THEN
     SELECT branch_id INTO v_author_branch_id
     FROM public.profiles
@@ -500,7 +601,6 @@ BEGIN
       NEW.branch_id := v_author_branch_id;
     END IF;
   END IF;
-
   RETURN NEW;
 END;
 $$;
@@ -511,26 +611,13 @@ CREATE TRIGGER trg_auto_set_post_branch
   FOR EACH ROW
   EXECUTE FUNCTION public.auto_set_post_branch_from_author();
 
--- 14. AUTHORITATIVE BRANCH_ID ON CLUBS, EVENTS, AND CHANNEL MESSAGES
-ALTER TABLE public.clubs
-  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
+REVOKE ALL ON FUNCTION public.auto_set_post_branch_from_author() FROM PUBLIC;
 
-ALTER TABLE public.events
-  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
-
-ALTER TABLE public.channel_messages
-  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
-
-CREATE INDEX IF NOT EXISTS idx_clubs_branch_id ON public.clubs(branch_id);
-CREATE INDEX IF NOT EXISTS idx_events_branch_id ON public.events(branch_id);
-CREATE INDEX IF NOT EXISTS idx_channel_messages_branch_id ON public.channel_messages(branch_id);
-
--- Auto-set branch_id from creator/sender triggers
 CREATE OR REPLACE FUNCTION public.auto_set_event_branch_from_creator()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   v_creator_branch_id UUID;
@@ -554,11 +641,13 @@ CREATE TRIGGER trg_auto_set_event_branch
   FOR EACH ROW
   EXECUTE FUNCTION public.auto_set_event_branch_from_creator();
 
+REVOKE ALL ON FUNCTION public.auto_set_event_branch_from_creator() FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.auto_set_club_branch_from_creator()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   v_creator_branch_id UUID;
@@ -582,11 +671,13 @@ CREATE TRIGGER trg_auto_set_club_branch
   FOR EACH ROW
   EXECUTE FUNCTION public.auto_set_club_branch_from_creator();
 
+REVOKE ALL ON FUNCTION public.auto_set_club_branch_from_creator() FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.auto_set_message_branch_from_sender()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   v_sender_branch_id UUID;
@@ -610,7 +701,50 @@ CREATE TRIGGER trg_auto_set_message_branch
   FOR EACH ROW
   EXECUTE FUNCTION public.auto_set_message_branch_from_sender();
 
--- Backfill existing events, clubs, and messages
+REVOKE ALL ON FUNCTION public.auto_set_message_branch_from_sender() FROM PUBLIC;
+
+-- 14. COMPREHENSIVE BACKFILL & VALIDATION FOR EXISTING PROFILES AND CONTENT
+DO $$
+DECLARE
+  v_rec RECORD;
+  v_branch_id UUID;
+  v_display_name TEXT;
+BEGIN
+  -- A. Backfill profiles that have an unverified or verified student_id matching academic_branch_prefixes
+  FOR v_rec IN 
+    SELECT p.id, p.student_id
+    FROM public.profiles p
+    WHERE p.student_id IS NOT NULL 
+      AND pg_catalog.btrim(p.student_id) != ''
+      AND p.branch_id IS NULL
+  LOOP
+    SELECT ab.id, ab.display_name INTO v_branch_id, v_display_name
+    FROM public.academic_branch_prefixes abp
+    JOIN public.academic_branches ab ON ab.id = abp.branch_id
+    WHERE pg_catalog.left(pg_catalog.upper(pg_catalog.btrim(v_rec.student_id)), pg_catalog.length(abp.prefix)) = abp.prefix
+      AND abp.is_active = true
+    ORDER BY pg_catalog.length(abp.prefix) DESC
+    LIMIT 1;
+
+    IF v_branch_id IS NOT NULL THEN
+      UPDATE public.profiles
+      SET branch_id = v_branch_id,
+          department = v_display_name,
+          updated_at = pg_catalog.now()
+      WHERE id = v_rec.id;
+    END IF;
+  END LOOP;
+END $$;
+
+-- B. Backfill posts from author profiles
+UPDATE public.posts p
+SET branch_id = pr.branch_id
+FROM public.profiles pr
+WHERE p.user_id = pr.id
+  AND p.branch_id IS NULL
+  AND pr.branch_id IS NOT NULL;
+
+-- C. Backfill events from creator profiles
 UPDATE public.events e
 SET branch_id = pr.branch_id
 FROM public.profiles pr
@@ -618,6 +752,7 @@ WHERE e.created_by = pr.id
   AND e.branch_id IS NULL
   AND pr.branch_id IS NOT NULL;
 
+-- D. Backfill clubs from creator profiles
 UPDATE public.clubs c
 SET branch_id = pr.branch_id
 FROM public.profiles pr
@@ -625,6 +760,7 @@ WHERE c.created_by = pr.id
   AND c.branch_id IS NULL
   AND pr.branch_id IS NOT NULL;
 
+-- E. Backfill channel messages from sender profiles
 UPDATE public.channel_messages m
 SET branch_id = pr.branch_id
 FROM public.profiles pr

@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:security": "node scripts/test_live_postgresql_security.cjs"
+    "test:security": "node scripts/test_live_postgresql_security.cjs",
+    "test:db": "node scripts/run_ci_postgres_integration_tests.cjs",
+    "test:supabase": "node scripts/test_live_supabase_directory.cjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.2",
@@ -76,6 +78,7 @@
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.0.0",
     "@types/node": "^22.16.5",
+    "@types/pg": "^8.23.1",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react-swc": "^3.11.0",
@@ -86,6 +89,7 @@
     "globals": "^15.15.0",
     "jsdom": "^20.0.3",
     "lovable-tagger": "^1.1.13",
+    "pg": "^8.23.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.8.3",
