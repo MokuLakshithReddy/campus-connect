@@ -32,3 +32,6 @@ dist-ssr
 
 # Android builds
 *.apk
+
+# Credentials and sensitive reports
+*credentials*.csv
