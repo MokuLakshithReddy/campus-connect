@@ -1517,9 +1517,13 @@ CREATE SCHEMA IF NOT EXISTS internal;
 REVOKE ALL ON SCHEMA internal FROM PUBLIC, authenticated, anon;
 GRANT ALL ON SCHEMA internal TO postgres;
 
-CREATE TABLE IF NOT EXISTS internal.active_sync_authorizations (
-  user_id UUID PRIMARY KEY,
-  authorized_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+DROP TABLE IF EXISTS internal.active_sync_authorizations CASCADE;
+CREATE TABLE internal.active_sync_authorizations (
+  authorization_id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+  user_id UUID NOT NULL,
+  target_branch_id UUID NOT NULL,
+  authorized_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  consumed BOOLEAN NOT NULL DEFAULT false
 );
 REVOKE ALL ON TABLE internal.active_sync_authorizations FROM PUBLIC, authenticated, anon;
 GRANT ALL ON TABLE internal.active_sync_authorizations TO postgres;
@@ -1534,11 +1538,15 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+  v_auth_id UUID := pg_catalog.gen_random_uuid();
 BEGIN
-  -- Register authorization entry in private internal table
-  INSERT INTO internal.active_sync_authorizations (user_id, authorized_at)
-  VALUES (p_user_id, pg_catalog.clock_timestamp())
-  ON CONFLICT (user_id) DO UPDATE SET authorized_at = pg_catalog.clock_timestamp();
+  -- Set transaction-local operation id for this specific invocation
+  PERFORM pg_catalog.set_config('internal.active_sync_op_id', v_auth_id::text, true);
+
+  -- Register single-use authorization entry in private internal table
+  INSERT INTO internal.active_sync_authorizations (authorization_id, user_id, target_branch_id, authorized_at, consumed)
+  VALUES (v_auth_id, p_user_id, p_branch_id, pg_catalog.clock_timestamp(), false);
 
   UPDATE public.profiles
   SET branch_id = p_branch_id,
@@ -1547,8 +1555,11 @@ BEGIN
       updated_at = pg_catalog.now()
   WHERE id = p_user_id;
 
-  -- Clear authorization record immediately
-  DELETE FROM internal.active_sync_authorizations WHERE user_id = p_user_id;
+  -- Clear authorization record immediately after update
+  DELETE FROM internal.active_sync_authorizations WHERE authorization_id = v_auth_id;
+
+  -- Clear session parameter
+  PERFORM pg_catalog.set_config('internal.active_sync_op_id', '', true);
 END;
 $$;
 
@@ -1595,13 +1606,35 @@ BEGIN
 
       IF (OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id) OR
          (NEW.is_verified IS DISTINCT FROM OLD.is_verified) THEN
-        IF NOT EXISTS (
-          SELECT 1 FROM internal.active_sync_authorizations
-          WHERE user_id = NEW.id
-            AND authorized_at >= pg_catalog.clock_timestamp() - INTERVAL '10 seconds'
-        ) THEN
-          RAISE EXCEPTION 'Unauthorized: Academic status can only be modified through verified directory synchronization';
-        END IF;
+        DECLARE
+          v_op_id_str TEXT := pg_catalog.current_setting('internal.active_sync_op_id', true);
+          v_op_id UUID;
+          v_valid_auth BOOLEAN := false;
+        BEGIN
+          IF v_op_id_str IS NOT NULL AND v_op_id_str != '' THEN
+            BEGIN
+              v_op_id := v_op_id_str::uuid;
+            EXCEPTION WHEN OTHERS THEN
+              v_op_id := NULL;
+            END;
+          END IF;
+
+          IF v_op_id IS NOT NULL THEN
+            -- Atomically consume the specific authorization record tied to this operation
+            UPDATE internal.active_sync_authorizations
+            SET consumed = true
+            WHERE authorization_id = v_op_id
+              AND user_id = NEW.id
+              AND target_branch_id = NEW.branch_id
+              AND consumed = false
+              AND authorized_at >= pg_catalog.clock_timestamp() - INTERVAL '5 seconds'
+            RETURNING true INTO v_valid_auth;
+          END IF;
+
+          IF NOT COALESCE(v_valid_auth, false) THEN
+            RAISE EXCEPTION 'Unauthorized: Academic status can only be modified through verified directory synchronization';
+          END IF;
+        END;
       END IF;
 
       IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
@@ -1627,6 +1660,82 @@ REVOKE ALL ON FUNCTION public.protect_profile_academic_fields() FROM PUBLIC;
 -- Defense-in-depth: Column-level permissions prevent authenticated users from directly updating sensitive academic fields
 REVOKE UPDATE ON public.profiles FROM authenticated;
 GRANT UPDATE (username, bio, avatar_url, updated_at) ON public.profiles TO authenticated;
+
+-- Privacy protection: Prevent direct reading of sensitive student roll numbers (student_id) across all profiles
+REVOKE SELECT ON public.profiles FROM authenticated, anon;
+GRANT SELECT (
+  id,
+  username,
+  bio,
+  avatar_url,
+  college_role,
+  department,
+  year,
+  branch_id,
+  is_verified,
+  created_at,
+  updated_at
+) ON public.profiles TO authenticated, anon;
+
+-- Dedicated secure RPC for authenticated users to view their own full profile including student_id
+CREATE OR REPLACE FUNCTION public.get_my_profile()
+RETURNS TABLE (
+  id UUID,
+  username TEXT,
+  student_id TEXT,
+  college_role TEXT,
+  is_verified BOOLEAN,
+  must_change_password BOOLEAN,
+  department TEXT,
+  year TEXT,
+  branch_id UUID,
+  bio TEXT,
+  avatar_url TEXT,
+  created_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ
+)
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+AS $$
+  SELECT 
+    p.id,
+    p.username,
+    p.student_id,
+    p.college_role,
+    p.is_verified,
+    p.must_change_password,
+    p.department,
+    p.year,
+    p.branch_id,
+    p.bio,
+    p.avatar_url,
+    p.created_at,
+    p.updated_at
+  FROM public.profiles p
+  WHERE p.id = auth.uid();
+$$;
+
+REVOKE ALL ON FUNCTION public.get_my_profile() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_my_profile() TO authenticated;
+
+-- Safe public profiles view exposing only authorized non-sensitive fields
+CREATE OR REPLACE VIEW public.public_profiles AS
+SELECT 
+  id,
+  username,
+  bio,
+  avatar_url,
+  college_role,
+  department,
+  year,
+  branch_id,
+  is_verified,
+  created_at
+FROM public.profiles;
+
+GRANT SELECT ON public.public_profiles TO authenticated, anon;
 
 -- 7. SEED ACADEMIC BRANCHES & CONFIRMED PREFIXES
 DO $$
@@ -1961,6 +2070,7 @@ CREATE POLICY "Audience can view posts" ON public.posts
   );
 
 DROP POLICY IF EXISTS "View published events or club organizers" ON public.events;
+DROP POLICY IF EXISTS "View published events or organizer drafts" ON public.events;
 DROP POLICY IF EXISTS "Audience can view events" ON public.events;
 CREATE POLICY "Audience can view events" ON public.events
   FOR SELECT TO authenticated
@@ -1977,6 +2087,7 @@ CREATE POLICY "Audience can view events" ON public.events
   );
 
 DROP POLICY IF EXISTS "View active clubs or own proposals" ON public.clubs;
+DROP POLICY IF EXISTS "View active clubs or own pending clubs" ON public.clubs;
 DROP POLICY IF EXISTS "Audience can view clubs" ON public.clubs;
 CREATE POLICY "Audience can view clubs" ON public.clubs
   FOR SELECT TO authenticated

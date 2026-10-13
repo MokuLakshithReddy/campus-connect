@@ -437,6 +437,106 @@ async function runTestSuite() {
     // Clean up test posts
     await querySql(`DELETE FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');`);
 
+    // 12. Direct Profile Privacy Enforcement (Column-Level Protection)
+    total++;
+    process.stdout.write('[Test 12] Testing direct profile read privacy (preventing student_id column leakage)... ');
+    let directStudentIdLeakBlocked = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user2Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT student_id FROM public.profiles WHERE id = '${user1Id}';
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('permission denied for column student_id') || err.message.includes('permission denied')) {
+        directStudentIdLeakBlocked = true;
+      }
+    }
+
+    const ownProfileRes = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user1Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT * FROM public.get_my_profile();
+      COMMIT;
+    `);
+    const ownProfileRow = Array.isArray(ownProfileRes) ? ownProfileRes[0] : null;
+
+    if (directStudentIdLeakBlocked && ownProfileRow && ownProfileRow.student_id === testRoll) {
+      console.log('PASSED (Direct student_id column queries denied; caller reads own record via get_my_profile RPC)');
+      passed++;
+    } else {
+      throw new Error(`Privacy check failed! leakBlocked=${directStudentIdLeakBlocked}, ownProfile=${JSON.stringify(ownProfileRow)}`);
+    }
+
+    // 13. Concurrency-Safe Atomic Internal Authorization Lifecycle
+    total++;
+    process.stdout.write('[Test 13] Testing atomic authorization cleanup (no lingering authorizations in internal table)... ');
+    const authTableRes = await querySql(`SELECT count(*) AS cnt FROM internal.active_sync_authorizations;`);
+    const remainingAuths = parseInt(authTableRes[0].cnt, 10);
+    if (remainingAuths === 0) {
+      console.log('PASSED (0 lingering authorization records; consumed and purged atomically)');
+      passed++;
+    } else {
+      throw new Error(`Lingering authorization records detected: ${remainingAuths}`);
+    }
+
+    // 14. Feed Audience & Club-Member Isolation (Database-Backed Integration Test)
+    total++;
+    process.stdout.write('[Test 14] Testing feed audience isolation (college vs branch vs club-members)... ');
+    const testClubId = crypto.randomUUID();
+    const collegeEventId = crypto.randomUUID();
+    const branchEventId = crypto.randomUUID();
+    const memberEventId = crypto.randomUUID();
+
+    // Create a test club (with user1 as creator)
+    await querySql(`
+      INSERT INTO public.clubs (id, name, slug, category, status, content_visibility, created_by, branch_id)
+      VALUES ('${testClubId}', 'Test AIML Club ${testClubId.slice(0, 6)}', 'test-aiml-club-${testClubId.slice(0, 8)}', 'Technical', 'active', 'college', '${user1Id}', '${aimlBranchId}');
+    `);
+
+    // Insert 3 test events under different visibility scopes
+    await querySql(`
+      INSERT INTO public.events (id, club_id, title, venue, start_time, is_published, content_visibility, branch_id, created_by)
+      VALUES 
+        ('${collegeEventId}', '${testClubId}', 'College Fest', 'Main Hall', now() + interval '1 day', true, 'college', NULL, '${user1Id}'),
+        ('${branchEventId}', '${testClubId}', 'AIML Workshop', 'Lab 1', now() + interval '2 days', true, 'branch', '${aimlBranchId}', '${user1Id}'),
+        ('${memberEventId}', '${testClubId}', 'Secret Club Meeting', 'Room 10', now() + interval '3 days', true, 'club_members', '${aimlBranchId}', '${user1Id}');
+    `);
+
+    // User 2 (not in AIML branch, not a club member) queries events
+    const user2Events = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user2Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT id FROM public.events WHERE id IN ('${collegeEventId}', '${branchEventId}', '${memberEventId}');
+      COMMIT;
+    `);
+    const user2EventIds = user2Events.map(e => e.id);
+
+    // User 2 must see ONLY the college-wide event
+    const user2IsolationPassed = user2EventIds.includes(collegeEventId) && 
+                                 !user2EventIds.includes(branchEventId) && 
+                                 !user2EventIds.includes(memberEventId);
+
+    // Clean up test events and club
+    await querySql(`
+      DELETE FROM public.events WHERE id IN ('${collegeEventId}', '${branchEventId}', '${memberEventId}');
+      DELETE FROM public.clubs WHERE id = '${testClubId}';
+    `);
+
+    if (user2IsolationPassed) {
+      console.log('PASSED (College event visible to all; branch & club_members events restricted by database RLS)');
+      passed++;
+    } else {
+      throw new Error(`Feed audience check failed: user2 saw ${JSON.stringify(user2EventIds)}`);
+    }
+
     console.log('\n================================================================================');
     console.log(`ALL TESTS PASSED: ${passed}/${total} live integration tests successful.`);
     console.log('================================================================================\n');

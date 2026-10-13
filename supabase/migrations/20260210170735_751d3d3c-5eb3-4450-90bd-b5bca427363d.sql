@@ -124,7 +124,22 @@ CREATE POLICY "Post images are publicly accessible" ON storage.objects FOR SELEC
 CREATE POLICY "Users can upload post images" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'posts' AND auth.uid()::text = (storage.foldername(name))[1]);
 CREATE POLICY "Users can delete post images" ON storage.objects FOR DELETE USING (bucket_id = 'posts' AND auth.uid()::text = (storage.foldername(name))[1]);
 
--- Enable realtime for posts, likes, comments
-ALTER PUBLICATION supabase_realtime ADD TABLE public.posts;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.likes;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.comments;
+-- Enable realtime for posts, likes, comments (safely ensure publication exists)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    CREATE PUBLICATION supabase_realtime;
+  END IF;
+  BEGIN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.posts;
+  EXCEPTION WHEN duplicate_object THEN NULL;
+  END;
+  BEGIN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.likes;
+  EXCEPTION WHEN duplicate_object THEN NULL;
+  END;
+  BEGIN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.comments;
+  EXCEPTION WHEN duplicate_object THEN NULL;
+  END;
+END $$;

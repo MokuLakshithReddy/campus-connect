@@ -91,14 +91,17 @@ const Profile = () => {
     try {
       setLoading(true);
 
-      // 1. Fetch Profile from Supabase
+      // 1. Fetch Profile from Supabase (Safe non-sensitive attributes)
       const { data: profileRes, error: profileErr } = await supabase
         .from("profiles")
-        .select("*")
+        .select("id, username, bio, avatar_url, department, year, college_role, is_verified, branch_id, created_at")
         .eq("id", effectiveUserId)
         .maybeSingle();
 
-      let profileData = profileRes as UserProfileData | null;
+      let profileData = (profileRes ? {
+        ...profileRes,
+        student_id: isOwn && profile?.student_id ? profile.student_id : null,
+      } : null) as UserProfileData | null;
 
       // Self-healing: If user row exists in auth but missing in profiles table
       if (!profileData && isOwn && user) {
@@ -192,7 +195,7 @@ const Profile = () => {
     } finally {
       setLoading(false);
     }
-  }, [effectiveUserId, isOwn, user, authLoading]);
+  }, [effectiveUserId, isOwn, user, authLoading, profile?.student_id]);
 
   useEffect(() => {
     if (effectiveUserId) {

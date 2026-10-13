@@ -2,7 +2,7 @@
  * POSTGRESQL CI INTEGRATION TEST RUNNER (DUAL-PATH & MIGRATION VERIFICATION)
  * 
  * Runs end-to-end against a real PostgreSQL instance (e.g. GitHub Actions Postgres service container):
- * 1. Bootstraps auth & storage schemas, extensions, and standard roles
+ * 1. Bootstraps auth & storage schemas, realtime publication, extensions, and standard roles
  * 2. PATH 1: Applies all migrations sequentially (supabase/migrations/*.sql) on clean database
  * 3. Executes complete security test suite against migrations-built database
  * 4. PATH 2: Re-verifies against consolidated schema (supabase/schema.sql) on clean database
@@ -17,10 +17,12 @@
  * - Self-escalation prevention on UPDATE (college_role cannot be self-modified)
  * - Self-escalation prevention on INSERT (auth user fixture + forced downgrade to student, unverified)
  * - Anti-spoofing branch triggers on posts (INSERT & UPDATE)
- * - Non-forgeable internal authorization table (internal.active_sync_authorizations)
- * - Regression test: Setting internal.active_sync_token gives ZERO bypass capability
+ * - Concurrency-safe atomic internal authorization table (internal.active_sync_authorizations)
+ * - Setting internal session variables gives ZERO bypass capability
+ * - Column-level privacy enforcement: Direct reading of student_id by other users is rejected
+ * - Dedicated get_my_profile() RPC for self-profile loading
  * - search_campus_students privacy scoping, cross-branch scraping protection, and masking
- * - PostgreSQL RLS audience enforcement (college vs branch)
+ * - PostgreSQL RLS audience enforcement (college vs branch vs club-members)
  * - Student directory integrity audit function (audit_student_directory_integrity)
  */
 
@@ -73,6 +75,15 @@ async function bootstrapEnvironment(client) {
       END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
         CREATE ROLE service_role NOLOGIN;
+      END IF;
+    END
+    $$;
+
+    -- Bootstrap Supabase Realtime Publication if not already present
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+        CREATE PUBLICATION supabase_realtime;
       END IF;
     END
     $$;
@@ -452,10 +463,10 @@ async function runSecurityTestSuite(client, testContextName) {
     let directVerifyBlocked = false;
     let branchTamperBlocked = false;
 
-    // A. Attempt to set internal.active_sync_token and self-verify
+    // A. Attempt to set internal.active_sync_op_id and self-verify
     try {
       await withAuthenticatedSession(client, user2Id, async () => {
-        await client.query(`SET LOCAL internal.active_sync_token = 'malicious_caller_token';`);
+        await client.query(`SET LOCAL internal.active_sync_op_id = '${crypto.randomUUID()}';`);
         await client.query(`UPDATE public.profiles SET is_verified = true WHERE id = '${user2Id}';`);
       });
     } catch (err) {
@@ -464,10 +475,10 @@ async function runSecurityTestSuite(client, testContextName) {
       }
     }
 
-    // B. Attempt to set internal.active_sync_token and change branch
+    // B. Attempt to set internal.active_sync_op_id and change branch
     try {
       await withAuthenticatedSession(client, user2Id, async () => {
-        await client.query(`SET LOCAL internal.active_sync_token = 'malicious_caller_token';`);
+        await client.query(`SET LOCAL internal.active_sync_op_id = '${crypto.randomUUID()}';`);
         await client.query(`UPDATE public.profiles SET branch_id = '${aimlBranchId}' WHERE id = '${user2Id}';`);
       });
     } catch (err) {
@@ -477,7 +488,7 @@ async function runSecurityTestSuite(client, testContextName) {
     }
 
     if (directVerifyBlocked && branchTamperBlocked) {
-      console.log('PASSED (Both is_verified and branch_id tampering blocked even after client sets internal token)');
+      console.log('PASSED (Both is_verified and branch_id tampering blocked even after client sets internal config)');
       passed++;
     } else {
       throw new Error(`Security bypass succeeded! directVerifyBlocked=${directVerifyBlocked}, branchTamperBlocked=${branchTamperBlocked}`);
@@ -529,9 +540,9 @@ async function runSecurityTestSuite(client, testContextName) {
       throw new Error(`Search student check failed: ${JSON.stringify(ownBranchSearch.rows)}`);
     }
 
-    // TEST 12: Database-Level Audience RLS Policies
+    // TEST 12: Database-Level Audience RLS Policies on Posts
     total++;
-    process.stdout.write('[Test 12] Testing database-level audience RLS policies (branch vs college)... ');
+    process.stdout.write('[Test 12] Testing database-level audience RLS policies (branch vs college posts)... ');
     const testPostCollegeId = crypto.randomUUID();
     const testPostBranchId = crypto.randomUUID();
 
@@ -576,6 +587,93 @@ async function runSecurityTestSuite(client, testContextName) {
       passed++;
     } else {
       throw new Error(`Directory audit flagged valid test record: ${JSON.stringify(anomalousEntries)}`);
+    }
+
+    // TEST 14: Direct Profile Privacy Enforcement (Column-Level Protection)
+    total++;
+    process.stdout.write('[Test 14] Testing direct profile read privacy (preventing student_id column leakage)... ');
+    let directStudentIdLeakBlocked = false;
+    try {
+      await withAuthenticatedSession(client, user2Id, async () => {
+        // User 2 attempts to select another student's sensitive student_id directly from public.profiles
+        await client.query(`SELECT student_id FROM public.profiles WHERE id = '${user1Id}';`);
+      });
+    } catch (err) {
+      if (err.message.includes('permission denied for column student_id') || err.message.includes('permission denied')) {
+        directStudentIdLeakBlocked = true;
+      }
+    }
+
+    // Verify User 1 CAN load their own full profile via secure get_my_profile() RPC
+    const ownProfileRes = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT * FROM public.get_my_profile();`);
+    });
+    const ownProfileRow = ownProfileRes.rows[0];
+
+    if (directStudentIdLeakBlocked && ownProfileRow && ownProfileRow.student_id === testRoll) {
+      console.log('PASSED (Direct student_id column queries denied; caller reads own record via get_my_profile RPC)');
+      passed++;
+    } else {
+      throw new Error(`Privacy check failed! leakBlocked=${directStudentIdLeakBlocked}, ownProfile=${JSON.stringify(ownProfileRow)}`);
+    }
+
+    // TEST 15: Concurrency-Safe Atomic Internal Authorization Lifecycle
+    total++;
+    process.stdout.write('[Test 15] Testing atomic authorization cleanup (no lingering authorizations in internal table)... ');
+    const authTableRes = await client.query(`SELECT count(*) AS cnt FROM internal.active_sync_authorizations;`);
+    const remainingAuths = parseInt(authTableRes.rows[0].cnt, 10);
+    if (remainingAuths === 0) {
+      console.log('PASSED (0 lingering authorization records; consumed and purged atomically)');
+      passed++;
+    } else {
+      throw new Error(`Lingering authorization records detected: ${remainingAuths}`);
+    }
+
+    // TEST 16: Feed Audience & Club-Member Isolation (Database-Backed Integration Test)
+    total++;
+    process.stdout.write('[Test 16] Testing feed audience isolation (college vs branch vs club-members)... ');
+    const testClubId = crypto.randomUUID();
+    const collegeEventId = crypto.randomUUID();
+    const branchEventId = crypto.randomUUID();
+    const memberEventId = crypto.randomUUID();
+
+    // Create a test club (with user1 as creator)
+    await client.query(`
+      INSERT INTO public.clubs (id, name, slug, category, status, content_visibility, created_by, branch_id)
+      VALUES ('${testClubId}', 'Test AIML Club ${testClubId.slice(0, 6)}', 'test-aiml-club-${testClubId.slice(0, 8)}', 'Technical', 'active', 'college', '${user1Id}', '${aimlBranchId}');
+    `);
+
+    // Insert 3 test events under different visibility scopes
+    await client.query(`
+      INSERT INTO public.events (id, club_id, title, venue, start_time, is_published, content_visibility, branch_id, created_by)
+      VALUES 
+        ('${collegeEventId}', '${testClubId}', 'College Fest', 'Main Hall', now() + interval '1 day', true, 'college', NULL, '${user1Id}'),
+        ('${branchEventId}', '${testClubId}', 'AIML Workshop', 'Lab 1', now() + interval '2 days', true, 'branch', '${aimlBranchId}', '${user1Id}'),
+        ('${memberEventId}', '${testClubId}', 'Secret Club Meeting', 'Room 10', now() + interval '3 days', true, 'club_members', '${aimlBranchId}', '${user1Id}');
+    `);
+
+    // User 2 (not in AIML branch, not a club member) queries events
+    const user2Events = await withAuthenticatedSession(client, user2Id, async () => {
+      return await client.query(`SELECT id FROM public.events WHERE id IN ('${collegeEventId}', '${branchEventId}', '${memberEventId}');`);
+    });
+    const user2EventIds = user2Events.rows.map(e => e.id);
+
+    // User 2 must see ONLY the college-wide event
+    const user2IsolationPassed = user2EventIds.includes(collegeEventId) && 
+                                 !user2EventIds.includes(branchEventId) && 
+                                 !user2EventIds.includes(memberEventId);
+
+    // Clean up test events and club
+    await client.query(`
+      DELETE FROM public.events WHERE id IN ('${collegeEventId}', '${branchEventId}', '${memberEventId}');
+      DELETE FROM public.clubs WHERE id = '${testClubId}';
+    `);
+
+    if (user2IsolationPassed) {
+      console.log('PASSED (College event visible to all; branch & club_members events restricted by database RLS)');
+      passed++;
+    } else {
+      throw new Error(`Feed audience check failed: user2 saw ${JSON.stringify(user2EventIds)}`);
     }
 
     console.log(`\n>> Result for [${testContextName}]: ${passed}/${total} tests PASSED.`);

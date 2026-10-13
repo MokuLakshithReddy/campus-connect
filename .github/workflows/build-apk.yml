@@ -1,19 +1,15 @@
-name: Build Android APK
+name: Build Android Debug APK (Preview)
 
 on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Android Debug APK
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout Repository
@@ -49,27 +45,13 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --stacktrace
 
-      - name: Prepare APK files
+      - name: Prepare Debug APK artifact
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk campus-connect-v1.2.6.apk
-          cp android/app/build/outputs/apk/debug/app-debug.apk campus-connect.apk
-          cp android/app/build/outputs/apk/debug/app-debug.apk social-feed-connect.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk campus-connect-preview-debug.apk
 
-      - name: Upload APK as Workflow Artifact
+      - name: Upload Debug APK as Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: campus-connect-apk
-          path: campus-connect-v1.2.6.apk
+          name: campus-connect-preview-debug-apk
+          path: campus-connect-preview-debug.apk
 
-      - name: Attach APK to GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: CampusConnect ${{ github.ref_name }}
-          files: |
-            campus-connect-v1.2.6.apk
-            campus-connect.apk
-            social-feed-connect.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -45,11 +45,27 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const fetchProfile = async (userId: string) => {
     try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("student_id, username, college_role, is_verified, must_change_password, department, year, branch_id")
-        .eq("id", userId)
-        .maybeSingle();
+      // Primary secure path: fetch caller's own full profile via dedicated RPC
+      const { data: rpcData, error: rpcError } = await (supabase.rpc as any)("get_my_profile");
+
+      let data: any = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      let error = rpcError;
+
+      // Fallback: If RPC is unavailable or returns null, query safe public columns
+      if (!data) {
+        const fallbackRes = await supabase
+          .from("profiles")
+          .select("id, username, college_role, is_verified, department, year, branch_id")
+          .eq("id", userId)
+          .maybeSingle();
+
+        if (fallbackRes.data) {
+          data = fallbackRes.data;
+          error = null;
+        } else if (fallbackRes.error && !error) {
+          error = fallbackRes.error;
+        }
+      }
 
       if (error) {
         console.error("Database error fetching user profile:", error);

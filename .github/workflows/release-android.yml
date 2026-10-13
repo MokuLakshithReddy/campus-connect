@@ -1,0 +1,166 @@
+name: Release Android Production (Signed APK & AAB)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Version tag to release (e.g. v1.2.6)'
+        required: false
+        default: ''
+
+jobs:
+  release:
+    name: Build & Publish Production Android Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Set up Java JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 21
+
+      - name: Setup Gradle Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Determine Release Version
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            RAW_TAG="${{ github.ref_name }}"
+          elif [ -n "${{ github.event.inputs.version_tag }}" ]; then
+            RAW_TAG="${{ github.event.inputs.version_tag }}"
+          else
+            RAW_TAG="v$(node -p "require('./package.json').version")"
+          fi
+          VER="${RAW_TAG#v}"
+          echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Building CampusConnect Android Release Version: ${VER} (Tag: ${RAW_TAG})"
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+      - name: Build Web Application
+        env:
+          VITE_SUPABASE_PROJECT_ID: "gtkvujspajcelzufpggr"
+          VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_fr0wwYVpS66JH1qHwbUxbA_QJ8uNjMk"
+          VITE_SUPABASE_URL: "https://gtkvujspajcelzufpggr.supabase.co"
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      - name: Configure Android Signing Credentials
+        id: signing_setup
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KEYSTORE_DIR="${RUNNER_TEMP}/keystore"
+          mkdir -p "${KEYSTORE_DIR}"
+          KEYSTORE_FILE="${KEYSTORE_DIR}/release.keystore"
+
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "Using production signing credentials from repository secrets."
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+            echo "KEYSTORE_PATH=${KEYSTORE_FILE}" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=${KEY_ALIAS}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "is_signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Production signing secrets (ANDROID_KEYSTORE_BASE64) not found. Generating ephemeral release key for build verification."
+            keytool -genkeypair -v -keystore "$KEYSTORE_FILE" -alias "campusconnect" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "campusconnectpass" -keypass "campusconnectpass" \
+              -dname "CN=CampusConnect, OU=Mobile, O=CampusConnect, L=Campus, S=State, C=IN"
+            echo "KEYSTORE_PATH=${KEYSTORE_FILE}" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=campusconnectpass" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=campusconnect" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=campusconnectpass" >> "$GITHUB_ENV"
+            echo "is_signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Release APK and Android App Bundle (AAB)
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew bundleRelease assembleRelease --stacktrace
+
+      - name: Package & Verify Release Artifacts
+        id: package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # Locate built APK and AAB
+          SRC_APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          SRC_AAB=$(find android/app/build/outputs/bundle/release -name "*.aab" | head -n 1)
+
+          if [ -z "$SRC_APK" ] || [ -z "$SRC_AAB" ]; then
+            echo "::error::Release build artifacts not found."
+            exit 1
+          fi
+
+          mkdir -p release-artifacts
+          TARGET_APK="release-artifacts/campus-connect-${TAG}.apk"
+          TARGET_AAB="release-artifacts/campus-connect-${TAG}.aab"
+          TARGET_CHECKSUM="release-artifacts/campus-connect-${TAG}-checksums.txt"
+
+          cp "$SRC_APK" "$TARGET_APK"
+          cp "$SRC_AAB" "$TARGET_AAB"
+
+          cd release-artifacts
+          sha256sum "campus-connect-${TAG}.apk" > "campus-connect-${TAG}-checksums.txt"
+          sha256sum "campus-connect-${TAG}.aab" >> "campus-connect-${TAG}-checksums.txt"
+          cd ..
+
+          echo "apk_path=${TARGET_APK}" >> "$GITHUB_OUTPUT"
+          echo "aab_path=${TARGET_AAB}" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=${TARGET_CHECKSUM}" >> "$GITHUB_OUTPUT"
+          echo "Artifacts generated successfully:"
+          cat "$TARGET_CHECKSUM"
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: campus-connect-${{ steps.version.outputs.tag }}-production-release
+          path: release-artifacts/*
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.version_tag != ''
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: CampusConnect Production Release ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release-artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -57,8 +57,17 @@ CREATE POLICY "Users can send messages in their conversations"
     )
   );
 
--- Enable realtime for messages
-ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
+-- Enable realtime for messages (safely ensure publication exists)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    CREATE PUBLICATION supabase_realtime;
+  END IF;
+  BEGIN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
+  EXCEPTION WHEN duplicate_object THEN NULL;
+  END;
+END $$;
 
 -- Index for performance
 CREATE INDEX idx_messages_conversation_id ON public.messages(conversation_id);

@@ -122,6 +122,9 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON public.notifications(u
 -- 10. REALTIME PUBLICATION
 DO $$
 BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+    CREATE PUBLICATION supabase_realtime;
+  END IF;
   BEGIN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.channel_messages;
   EXCEPTION WHEN duplicate_object THEN END;

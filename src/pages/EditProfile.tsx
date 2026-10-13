@@ -52,11 +52,19 @@ const EditProfile = () => {
     try {
       setInitialLoading(true);
       setLoadError(null);
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("username, bio, department, year, student_id, is_verified, college_role")
-        .eq("id", user.id)
-        .maybeSingle();
+      const { data: rpcData, error: rpcError } = await (supabase.rpc as any)("get_my_profile");
+      let data: any = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      let error = rpcError;
+
+      if (!data) {
+        const fallbackRes = await supabase
+          .from("profiles")
+          .select("username, bio, department, year, is_verified, college_role")
+          .eq("id", user.id)
+          .maybeSingle();
+        data = fallbackRes.data;
+        error = fallbackRes.error;
+      }
 
       if (error) throw error;
       if (!data) throw new Error("Student profile record not found");
