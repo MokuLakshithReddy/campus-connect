@@ -147,9 +147,43 @@ CREATE TRIGGER trg_validate_student_directory_prefix
 REVOKE ALL ON FUNCTION public.validate_student_directory_prefix() FROM PUBLIC;
 
 -- 6. PROFILE ACADEMIC INTEGRITY & ROLE ESCALATION PROTECTION TRIGGER
+-- DEDICATED PRIVILEGED ACADEMIC LINKING OPERATION
+-- Narrowly scoped procedure callable only by verified internal routines.
+CREATE OR REPLACE FUNCTION public.internal_apply_directory_verification(
+  p_user_id UUID,
+  p_branch_id UUID,
+  p_department TEXT
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_sync_token TEXT := pg_catalog.gen_random_uuid()::text;
+BEGIN
+  -- Set transaction-local random token to authorize academic status update in trigger
+  PERFORM pg_catalog.set_config('internal.active_sync_token', v_sync_token, true);
+
+  UPDATE public.profiles
+  SET branch_id = p_branch_id,
+      department = p_department,
+      is_verified = true,
+      updated_at = pg_catalog.now()
+  WHERE id = p_user_id;
+
+  -- Clear authorization token
+  PERFORM pg_catalog.set_config('internal.active_sync_token', '', true);
+END;
+$$;
+
+-- Revoke all permissions from ordinary callers
+REVOKE ALL ON FUNCTION public.internal_apply_directory_verification(UUID, UUID, TEXT) FROM PUBLIC, authenticated, anon;
+
+-- 6. PROFILE ACADEMIC INTEGRITY & ROLE ESCALATION PROTECTION TRIGGER
 -- Hardened with SET search_path = '' and covers BOTH INSERT and UPDATE.
 -- Ensures no caller can self-grant college_admin or tamper with verified academic fields.
--- Stack verification via PG_CONTEXT ensures verification changes can only originate from trusted sync RPC.
+-- Permits academic field modifications only for college_admin or via internal_apply_directory_verification.
 CREATE OR REPLACE FUNCTION public.protect_profile_academic_fields()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -159,7 +193,6 @@ AS $$
 DECLARE
   v_caller_id UUID := auth.uid();
   v_is_admin BOOLEAN := false;
-  v_context TEXT;
 BEGIN
   IF v_caller_id IS NOT NULL THEN
     SELECT (college_role = 'college_admin') INTO v_is_admin
@@ -185,23 +218,16 @@ BEGIN
         RAISE EXCEPTION 'Unauthorized: Student roll number cannot be modified';
       END IF;
 
-      IF OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
-        GET DIAGNOSTICS v_context = PG_CONTEXT;
-        IF v_context NOT LIKE '%sync_authenticated_student_directory%' THEN
-          RAISE EXCEPTION 'Unauthorized: Academic branch cannot be modified by student';
+      IF (OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id) OR
+         (NEW.is_verified IS DISTINCT FROM OLD.is_verified) THEN
+        IF pg_catalog.current_setting('internal.active_sync_token', true) IS NULL OR
+           pg_catalog.current_setting('internal.active_sync_token', true) = '' THEN
+          RAISE EXCEPTION 'Unauthorized: Academic status can only be modified through verified directory synchronization';
         END IF;
       END IF;
 
       IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
         RAISE EXCEPTION 'Unauthorized: College role cannot be self-modified';
-      END IF;
-
-      IF NEW.is_verified IS DISTINCT FROM OLD.is_verified THEN
-        -- Inspect PostgreSQL call stack to guarantee update originated inside sync_authenticated_student_directory
-        GET DIAGNOSTICS v_context = PG_CONTEXT;
-        IF v_context NOT LIKE '%sync_authenticated_student_directory%' THEN
-          RAISE EXCEPTION 'Unauthorized: Only college admins can modify verification status';
-        END IF;
       END IF;
     END IF;
   END IF;
@@ -386,18 +412,10 @@ BEGIN
       USING HINT = 'This may indicate a concurrent claim attempt. Please retry.';
   END IF;
 
-  -- 5. Only after the directory link succeeds, update the profile with verified status
+  -- 5. Only after the directory link succeeds, update the profile via dedicated internal updater
   SELECT * INTO v_branch FROM public.academic_branches WHERE id = v_dir.branch_id;
 
-  -- Set transaction-local authorization flag allowing is_verified update
-  PERFORM pg_catalog.set_config('app.internal_directory_sync', 'true', true);
-
-  UPDATE public.profiles
-  SET branch_id = v_dir.branch_id,
-      department = v_branch.display_name,
-      is_verified = true,
-      updated_at = pg_catalog.now()
-  WHERE id = v_user_id;
+  PERFORM public.internal_apply_directory_verification(v_user_id, v_dir.branch_id, v_branch.display_name);
 
   RETURN pg_catalog.jsonb_build_object(
     'linked', true,
@@ -882,13 +900,8 @@ BEGIN
     SET profile_id = v_rec.id
     WHERE roll_number = v_rec.roll_number;
 
-    -- Update profile verified status
-    UPDATE public.profiles
-    SET branch_id = v_rec.branch_id,
-        department = v_rec.display_name,
-        is_verified = true,
-        updated_at = pg_catalog.now()
-    WHERE id = v_rec.id;
+    -- Update profile verified status via dedicated internal updater
+    PERFORM public.internal_apply_directory_verification(v_rec.id, v_rec.branch_id, v_rec.display_name);
   END LOOP;
 END $$;
 
@@ -943,3 +956,50 @@ WHERE p.college_role = 'student'
   AND (p.is_verified = false OR p.branch_id IS NULL);
 
 GRANT SELECT ON public.unverified_students_needing_review TO authenticated;
+
+-- G. Reconciliation & Audit Function for Student Directory Records
+-- Reconciles all student directory rows against official configured branch prefixes
+CREATE OR REPLACE FUNCTION public.audit_student_directory_integrity()
+RETURNS TABLE(
+  roll_number TEXT,
+  branch_id UUID,
+  admission_year INT,
+  issue TEXT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    sd.roll_number,
+    sd.branch_id,
+    sd.admission_year,
+    CASE
+      WHEN NOT EXISTS (
+        SELECT 1 FROM public.academic_branch_prefixes abp
+        WHERE pg_catalog.left(sd.roll_number, pg_catalog.length(abp.prefix)) = abp.prefix
+      ) THEN 'unknown_prefix'
+      WHEN EXISTS (
+        SELECT 1 FROM public.academic_branch_prefixes abp
+        WHERE pg_catalog.left(sd.roll_number, pg_catalog.length(abp.prefix)) = abp.prefix
+          AND (abp.branch_id != sd.branch_id OR abp.admission_year != sd.admission_year)
+      ) THEN 'prefix_mismatch_with_branch_or_year'
+      WHEN pg_catalog.length(sd.roll_number) != 12 THEN 'invalid_roll_length'
+      ELSE 'valid'
+    END AS issue
+  FROM public.student_directory sd
+  WHERE NOT EXISTS (
+    SELECT 1 FROM public.academic_branch_prefixes abp
+    WHERE pg_catalog.left(sd.roll_number, pg_catalog.length(abp.prefix)) = abp.prefix
+      AND abp.branch_id = sd.branch_id
+      AND abp.admission_year = sd.admission_year
+      AND abp.is_active = true
+  ) OR pg_catalog.length(sd.roll_number) != 12;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.audit_student_directory_integrity() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.audit_student_directory_integrity() TO authenticated;

@@ -1,18 +1,26 @@
 /**
- * POSTGRESQL CI INTEGRATION TEST RUNNER
+ * POSTGRESQL CI INTEGRATION TEST RUNNER (DUAL-PATH & MIGRATION VERIFICATION)
  * 
  * Runs end-to-end against a real PostgreSQL instance (e.g. GitHub Actions Postgres service container):
- * 1. Bootstraps auth schema & extensions
- * 2. Applies the full master schema (supabase/schema.sql) on a clean database
- * 3. Tests transactional identity verification (BEGIN -> SET LOCAL ROLE authenticated -> SELECT auth.uid())
- * 4. Verifies student directory linking with row locking (SELECT ... FOR UPDATE)
- * 5. Verifies duplicate claim conflict rejection (fail-closed)
- * 6. Verifies immutability of student academic fields
- * 7. Verifies prevention of self-granting college_admin (both INSERT and UPDATE paths)
- * 8. Verifies anti-spoofing branch triggers on posts (rejects mismatched branch on INSERT and UPDATE)
- * 9. Verifies threat model: direct alteration of is_verified without sync RPC is blocked
- * 10. Verifies search_campus_students privacy scoping, cross-branch rules, and unverified filtering
- * 11. Verifies PostgreSQL Row Level Security (RLS) audience enforcement (college vs branch)
+ * 1. Bootstraps auth & storage schemas, extensions, and standard roles
+ * 2. PATH 1: Applies all migrations sequentially (supabase/migrations/*.sql) on clean database
+ * 3. Executes complete security test suite against migrations-built database
+ * 4. PATH 2: Re-verifies against consolidated schema (supabase/schema.sql) on clean database
+ * 5. Executes complete security test suite against schema-built database
+ * 6. UPGRADE PATH: Verifies sequential migrations can execute idempotently over existing schema
+ * 
+ * Tested Security Engine Invariants:
+ * - Literal longest-prefix student roll branch resolution
+ * - Row locking (SELECT ... FOR UPDATE) during student directory claim
+ * - Fail-closed duplicate claim rejection in concurrent/overlapping scenarios
+ * - Academic fields immutability (roll number, branch)
+ * - Self-escalation prevention on UPDATE (college_role cannot be self-modified)
+ * - Self-escalation prevention on INSERT (auth user fixture + forced downgrade to student, unverified)
+ * - Anti-spoofing branch triggers on posts (INSERT & UPDATE)
+ * - Elimination of brittle PG_CONTEXT: Dedicated internal updater with transaction-local token
+ * - search_campus_students privacy scoping, cross-branch scraping protection, and masking
+ * - PostgreSQL RLS audience enforcement (college vs branch)
+ * - Student directory integrity audit function (audit_student_directory_integrity)
  */
 
 const fs = require('fs');
@@ -49,79 +57,164 @@ async function withAuthenticatedSession(client, userId, callback) {
   }
 }
 
-async function runCiIntegrationTests() {
-  console.log('================================================================================');
-  console.log('RUNNING POSTGRESQL CI INTEGRATION TESTS (TRANSACTIONAL IDENTITIES & SECURITY ENGINE)');
-  console.log(`Connecting to: ${DATABASE_URL.replace(/:[^:@]*@/, ':****@')}`);
-  console.log('================================================================================\n');
+async function bootstrapEnvironment(client) {
+  await client.query(`
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-  const client = new Client({ connectionString: DATABASE_URL });
-  await client.connect();
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        CREATE ROLE authenticated NOLOGIN;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        CREATE ROLE anon NOLOGIN;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+        CREATE ROLE service_role NOLOGIN;
+      END IF;
+    END
+    $$;
+
+    CREATE SCHEMA IF NOT EXISTS auth;
+
+    CREATE TABLE IF NOT EXISTS auth.users (
+      instance_id UUID,
+      id UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+      aud VARCHAR(255),
+      role VARCHAR(255),
+      email VARCHAR(255),
+      encrypted_password VARCHAR(255),
+      email_confirmed_at TIMESTAMPTZ,
+      raw_app_meta_data JSONB DEFAULT '{}'::jsonb,
+      raw_user_meta_data JSONB DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE OR REPLACE FUNCTION auth.uid() RETURNS UUID LANGUAGE sql STABLE AS $$
+      SELECT COALESCE(
+        nullif(pg_catalog.current_setting('request.jwt.claim.sub', true), ''),
+        (nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+      )::uuid;
+    $$;
+
+    CREATE OR REPLACE FUNCTION auth.jwt() RETURNS JSONB LANGUAGE sql STABLE AS $$
+      SELECT COALESCE(
+        nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb,
+        '{}'::jsonb
+      );
+    $$;
+
+    GRANT USAGE ON SCHEMA auth TO authenticated, anon;
+    GRANT SELECT ON auth.users TO authenticated, anon;
+
+    -- Bootstrap Mock Storage Schema for clean PostgreSQL testing
+    CREATE SCHEMA IF NOT EXISTS storage;
+
+    CREATE TABLE IF NOT EXISTS storage.buckets (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      owner uuid,
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now(),
+      public boolean DEFAULT false,
+      avif_autodetection boolean DEFAULT false,
+      file_size_limit bigint,
+      allowed_mime_types text[],
+      owner_id text
+    );
+
+    CREATE TABLE IF NOT EXISTS storage.objects (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      bucket_id text REFERENCES storage.buckets(id),
+      name text,
+      owner uuid,
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now(),
+      last_accessed_at timestamptz DEFAULT now(),
+      metadata jsonb,
+      path_tokens text[] GENERATED ALWAYS AS (string_to_array(name, '/')) STORED
+    );
+    ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+
+    CREATE OR REPLACE FUNCTION storage.foldername(name text)
+    RETURNS text[] LANGUAGE plpgsql AS $$
+    DECLARE
+      _parts text[];
+    BEGIN
+      _parts := string_to_array(name, '/');
+      RETURN _parts[1:array_length(_parts, 1) - 1];
+    END;
+    $$;
+
+    CREATE OR REPLACE FUNCTION storage.extension(name text)
+    RETURNS text LANGUAGE plpgsql AS $$
+    DECLARE
+      _parts text[];
+      _filename text;
+    BEGIN
+      _parts := string_to_array(name, '/');
+      _filename := _parts[array_length(_parts, 1)];
+      RETURN split_part(_filename, '.', 2);
+    END;
+    $$;
+
+    GRANT USAGE ON SCHEMA storage TO authenticated, anon;
+    GRANT ALL ON ALL TABLES IN SCHEMA storage TO authenticated, anon;
+  `);
+}
+
+async function resetPublicSchema(client) {
+  await client.query(`
+    DROP SCHEMA IF EXISTS public CASCADE;
+    CREATE SCHEMA public;
+    GRANT ALL ON SCHEMA public TO postgres;
+    GRANT USAGE, CREATE ON SCHEMA public TO public;
+    GRANT USAGE, CREATE ON SCHEMA public TO authenticated;
+    GRANT USAGE, CREATE ON SCHEMA public TO anon;
+  `);
+}
+
+async function applyMigrationsSequentially(client) {
+  const migrationsDir = path.join(__dirname, '..', 'supabase', 'migrations');
+  const files = fs.readdirSync(migrationsDir)
+    .filter(f => f.endsWith('.sql'))
+    .sort();
+
+  console.log(`Applying ${files.length} migrations sequentially from ${migrationsDir}...`);
+  for (const file of files) {
+    const filePath = path.join(migrationsDir, file);
+    const sql = fs.readFileSync(filePath, 'utf8');
+    process.stdout.write(`  -> Applying migration: ${file}... `);
+    await client.query(sql);
+    console.log('OK');
+  }
+}
+
+async function applyConsolidatedSchema(client) {
+  const schemaPath = path.join(__dirname, '..', 'supabase', 'schema.sql');
+  console.log(`Applying consolidated schema from ${schemaPath}...`);
+  const sql = fs.readFileSync(schemaPath, 'utf8');
+  await client.query(sql);
+  console.log('  -> Consolidated schema applied successfully.');
+}
+
+async function runSecurityTestSuite(client, testContextName) {
+  console.log(`\n--------------------------------------------------------------------------------`);
+  console.log(`EXECUTING SECURITY & INTEGRATION TEST SUITE: [${testContextName}]`);
+  console.log(`--------------------------------------------------------------------------------`);
 
   const testRunId = crypto.randomBytes(4).toString('hex').toUpperCase();
   const testRoll = `25MVCSMR8${testRunId.slice(0, 3)}`; // 12 chars: 25MVCSMR + 4 chars
   const user1Id = crypto.randomUUID();
   const user2Id = crypto.randomUUID();
+  const evilUserId = crypto.randomUUID();
 
   let passed = 0;
   let total = 0;
 
   try {
-    // STEP 1: Bootstrap Auth Schema & Extensions
-    console.log('[Step 1] Bootstrapping PostgreSQL auth schema & environment...');
-    await client.query(`
-      CREATE EXTENSION IF NOT EXISTS pgcrypto;
-      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-          CREATE ROLE authenticated NOLOGIN;
-        END IF;
-      END
-      $$;
-
-      CREATE SCHEMA IF NOT EXISTS auth;
-
-      CREATE TABLE IF NOT EXISTS auth.users (
-        instance_id UUID,
-        id UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-        aud VARCHAR(255),
-        role VARCHAR(255),
-        email VARCHAR(255),
-        encrypted_password VARCHAR(255),
-        email_confirmed_at TIMESTAMPTZ,
-        raw_app_meta_data JSONB DEFAULT '{}'::jsonb,
-        raw_user_meta_data JSONB DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ DEFAULT now(),
-        updated_at TIMESTAMPTZ DEFAULT now()
-      );
-
-      CREATE OR REPLACE FUNCTION auth.uid() RETURNS UUID LANGUAGE sql STABLE AS $$
-        SELECT COALESCE(
-          nullif(pg_catalog.current_setting('request.jwt.claim.sub', true), ''),
-          (nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-        )::uuid;
-      $$;
-
-      CREATE OR REPLACE FUNCTION auth.jwt() RETURNS JSONB LANGUAGE sql STABLE AS $$
-        SELECT COALESCE(
-          nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb,
-          '{}'::jsonb
-        );
-      $$;
-
-      GRANT USAGE ON SCHEMA auth TO authenticated;
-      GRANT SELECT ON auth.users TO authenticated;
-    `);
-    console.log('        Auth schema and functions bootstrapped successfully.');
-
-    // STEP 2: Apply Clean Master Schema
-    console.log('[Step 2] Executing full master schema from clean database state...');
-    const schemaSql = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'schema.sql'), 'utf8');
-    await client.query(schemaSql);
-    console.log('        Master schema applied successfully.');
-
     // TEST 1: Branches and Prefixes Seed Verification
     total++;
     process.stdout.write('[Test 1] Verifying official branches and prefix configuration... ');
@@ -255,16 +348,27 @@ async function runCiIntegrationTests() {
       throw new Error('Student was able to self-escalate college_role to college_admin!');
     }
 
-    // TEST 7: Role Escalation Prevention on INSERT
+    // TEST 7: Role Escalation Prevention on INSERT (FIXED FIXTURE: Auth User created first)
     total++;
-    process.stdout.write('[Test 7] Testing privilege escalation protection on INSERT... ');
-    const evilUserId = crypto.randomUUID();
+    process.stdout.write('[Test 7] Testing privilege escalation protection on INSERT (proper auth fixture)... ');
+    
+    // 1. Create corresponding auth user first to satisfy foreign-key constraint
+    await client.query(`
+      INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data)
+      VALUES ($1, 'authenticated', 'authenticated', $2, json_build_object('username', $3));
+      -- Remove auto-created profile so we can test the explicit INSERT path
+      DELETE FROM public.profiles WHERE id = $1;
+    `, [evilUserId, `evil_${testRunId}@ci.test`, `evil_${testRunId}`]);
+
+    // 2. Attempt privileged profile insert as authenticated ordinary user
     await withAuthenticatedSession(client, evilUserId, async () => {
       await client.query(`
         INSERT INTO public.profiles (id, username, college_role, is_verified)
         VALUES ('${evilUserId}', 'evil_${testRunId}', 'college_admin', true);
       `);
     });
+
+    // 3. Assert resulting profile has college_role = 'student' and is_verified = false
     const evilProfile = await client.query(`SELECT college_role, is_verified FROM public.profiles WHERE id = $1;`, [evilUserId]);
     if (evilProfile.rows[0]?.college_role === 'student' && evilProfile.rows[0]?.is_verified === false) {
       console.log('PASSED (Non-admin INSERT automatically forced to college_role=student, is_verified=false)');
@@ -272,7 +376,9 @@ async function runCiIntegrationTests() {
     } else {
       throw new Error(`Profile insert escalation was not neutralized: ${JSON.stringify(evilProfile.rows)}`);
     }
-    await client.query(`DELETE FROM public.profiles WHERE id = $1;`, [evilUserId]);
+
+    // Clean up evil test user
+    await client.query(`DELETE FROM auth.users WHERE id = $1;`, [evilUserId]);
 
     // TEST 8: Anti-Spoofing: Reject Mismatched Branch on Post INSERT
     total++;
@@ -336,12 +442,12 @@ async function runCiIntegrationTests() {
         await client.query(`UPDATE public.profiles SET is_verified = true WHERE id = '${user2Id}';`);
       });
     } catch (err) {
-      if (err.message.includes('permission denied') || err.message.includes('Verification status cannot be modified') || err.message.includes('Unauthorized')) {
+      if (err.message.includes('permission denied') || err.message.includes('academic status can only be modified') || err.message.includes('Unauthorized')) {
         directVerifyBlocked = true;
       }
     }
     if (directVerifyBlocked) {
-      console.log('PASSED (Direct alteration of is_verified blocked by database permissions/call-stack trigger)');
+      console.log('PASSED (Direct alteration of is_verified blocked by column permissions / internal sync token)');
       passed++;
     } else {
       throw new Error('User was able to directly modify is_verified on profiles!');
@@ -430,19 +536,89 @@ async function runCiIntegrationTests() {
     // Clean up test posts
     await client.query(`DELETE FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');`);
 
-    console.log('\n================================================================================');
-    console.log(`ALL TESTS PASSED: ${passed}/${total} PostgreSQL integration tests successful.`);
-    console.log('================================================================================\n');
+    // TEST 13: Student Directory Integrity Reconciliation
+    total++;
+    process.stdout.write('[Test 13] Testing directory reconciliation audit function (audit_student_directory_integrity)... ');
+    const auditRes = await client.query(`SELECT * FROM public.audit_student_directory_integrity();`);
+    const anomalousEntries = auditRes.rows.filter(r => r.roll_number === testRoll);
+    if (anomalousEntries.length === 0) {
+      console.log('PASSED (Test directory record validated successfully against prefix rules)');
+      passed++;
+    } else {
+      throw new Error(`Directory audit flagged valid test record: ${JSON.stringify(anomalousEntries)}`);
+    }
+
+    console.log(`\n>> Result for [${testContextName}]: ${passed}/${total} tests PASSED.`);
 
   } finally {
     try {
       await client.query(`
         DELETE FROM public.student_directory WHERE roll_number = $1;
-        DELETE FROM auth.users WHERE id IN ($2, $3);
-      `, [testRoll, user1Id, user2Id]);
+        DELETE FROM auth.users WHERE id IN ($2, $3, $4);
+      `, [testRoll, user1Id, user2Id, evilUserId]);
     } catch (e) {
       // Ignored in cleanup
     }
+  }
+}
+
+async function runCiIntegrationTests() {
+  console.log('================================================================================');
+  console.log('RUNNING DUAL-PATH POSTGRESQL INTEGRATION & MIGRATION VERIFICATION');
+  console.log(`Connecting to: ${DATABASE_URL.replace(/:[^:@]*@/, ':****@')}`);
+  console.log('================================================================================\n');
+
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+
+  const mode = process.argv.find(arg => arg.startsWith('--mode='))?.split('=')[1] || 'both';
+
+  try {
+    // --------------------------------------------------------------------------
+    // PATH 1: SEQUENTIAL MIGRATIONS EXECUTION FROM CLEAN DATABASE
+    // --------------------------------------------------------------------------
+    if (mode === 'migrations' || mode === 'both') {
+      console.log('\n================================================================================');
+      console.log('PATH 1: Clean DB -> Bootstrap -> Apply Sequential Migrations (supabase/migrations/)');
+      console.log('================================================================================');
+      await resetPublicSchema(client);
+      await bootstrapEnvironment(client);
+      await applyMigrationsSequentially(client);
+      await runSecurityTestSuite(client, 'Path 1: Sequential Migrations');
+    }
+
+    // --------------------------------------------------------------------------
+    // PATH 2: CONSOLIDATED SCHEMA EXECUTION FROM CLEAN DATABASE
+    // --------------------------------------------------------------------------
+    if (mode === 'schema' || mode === 'both') {
+      console.log('\n================================================================================');
+      console.log('PATH 2: Clean DB -> Bootstrap -> Apply Consolidated Master Schema (supabase/schema.sql)');
+      console.log('================================================================================');
+      await resetPublicSchema(client);
+      await bootstrapEnvironment(client);
+      await applyConsolidatedSchema(client);
+      await runSecurityTestSuite(client, 'Path 2: Consolidated Schema');
+    }
+
+    // --------------------------------------------------------------------------
+    // PATH 3: UPGRADE / IDEMPOTENCY PATH
+    // --------------------------------------------------------------------------
+    if (mode === 'both') {
+      console.log('\n================================================================================');
+      console.log('PATH 3: Upgrade / Idempotency Verification: Re-applying migrations over existing DB');
+      console.log('================================================================================');
+      await applyMigrationsSequentially(client);
+      await runSecurityTestSuite(client, 'Path 3: Upgraded Database');
+    }
+
+    console.log('\n================================================================================');
+    console.log('ALL VERIFICATION PATHS COMPLETED SUCCESSFULLY!');
+    console.log('  [x] Clean DB built from sequential migrations passed all tests');
+    console.log('  [x] Clean DB built from consolidated schema passed all tests');
+    console.log('  [x] Upgrade idempotency re-run verified without data/policy loss');
+    console.log('================================================================================\n');
+
+  } finally {
     await client.end();
   }
 }

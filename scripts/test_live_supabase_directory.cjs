@@ -299,12 +299,12 @@ async function runTestSuite() {
         COMMIT;
       `);
     } catch (err) {
-      if (err.message.includes('permission denied') || err.message.includes('Verification status cannot be modified') || err.message.includes('Unauthorized')) {
+      if (err.message.includes('permission denied') || err.message.includes('academic status can only be modified') || err.message.includes('Verification status cannot be modified') || err.message.includes('Unauthorized')) {
         directVerifyBlocked = true;
       }
     }
     if (directVerifyBlocked) {
-      console.log('PASSED (Direct alteration of is_verified blocked by database permissions/call-stack trigger)');
+      console.log('PASSED (Direct alteration of is_verified blocked by database permissions/internal sync trigger)');
       passed++;
     } else {
       throw new Error('User was able to directly modify is_verified on profiles!');
