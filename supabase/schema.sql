@@ -281,12 +281,29 @@ CREATE TABLE IF NOT EXISTS public.events (
 );
 
 -- 8. EVENT REGISTRATIONS TABLE
+CREATE OR REPLACE FUNCTION public.generate_qr_token()
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  BEGIN
+    RETURN encode(public.gen_random_bytes(16), 'hex');
+  EXCEPTION WHEN OTHERS THEN
+    BEGIN
+      RETURN encode(extensions.gen_random_bytes(16), 'hex');
+    EXCEPTION WHEN OTHERS THEN
+      RETURN replace(pg_catalog.gen_random_uuid()::text, '-', '');
+    END;
+  END;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS public.event_registrations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id UUID NOT NULL REFERENCES public.events(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered', 'waitlist', 'attended', 'cancelled')),
-  qr_code_token TEXT UNIQUE DEFAULT gen_random_uuid()::text,
+  qr_code_token TEXT NOT NULL UNIQUE DEFAULT public.generate_qr_token(),
   checked_in_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE (event_id, user_id)
@@ -868,16 +885,21 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_caller_id UUID := auth.uid();
+  v_must_change BOOLEAN;
 BEGIN
   IF v_caller_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
-  PERFORM set_config('campus.in_password_change', 'true', true);
-
-  UPDATE public.profiles
-  SET must_change_password = false, updated_at = NOW()
+  SELECT must_change_password INTO v_must_change
+  FROM public.profiles
   WHERE id = v_caller_id;
+
+  -- Security rule: The flag is automatically cleared server-side by public.handle_auth_user_password_changed() trigger on auth.users.
+  -- Direct client invocations without updating the password in auth.users are rejected.
+  IF COALESCE(v_must_change, true) THEN
+    RAISE EXCEPTION 'Password has not been updated yet. You must complete a password update via the auth service before this requirement can be cleared.';
+  END IF;
 
   RETURN jsonb_build_object('success', true, 'message', 'Password change completed successfully');
 END;
@@ -940,7 +962,9 @@ BEGIN
 END $$;
 
 -- PROFILES POLICIES
-CREATE POLICY "Anyone can view profiles" ON public.profiles
+DROP POLICY IF EXISTS "Anyone can view profiles" ON public.profiles;
+DROP POLICY IF EXISTS "Authenticated users view profiles" ON public.profiles;
+CREATE POLICY "Authenticated users view profiles" ON public.profiles
   FOR SELECT TO authenticated
   USING (true);
 
@@ -1662,6 +1686,7 @@ REVOKE UPDATE ON public.profiles FROM authenticated;
 GRANT UPDATE (username, bio, avatar_url, updated_at) ON public.profiles TO authenticated;
 
 -- Privacy protection: Prevent direct reading of sensitive student roll numbers (student_id) across all profiles
+REVOKE ALL ON public.profiles FROM PUBLIC, anon;
 REVOKE SELECT ON public.profiles FROM authenticated, anon;
 GRANT SELECT (
   id,
@@ -1675,7 +1700,7 @@ GRANT SELECT (
   is_verified,
   created_at,
   updated_at
-) ON public.profiles TO authenticated, anon;
+) ON public.profiles TO authenticated;
 
 -- Dedicated secure RPC for authenticated users to view their own full profile including student_id
 CREATE OR REPLACE FUNCTION public.get_my_profile()
@@ -2103,7 +2128,23 @@ CREATE POLICY "Audience can view clubs" ON public.clubs
     ))
   );
 
+-- D. CLUB CHANNELS AUDIENCE POLICY
+DROP POLICY IF EXISTS "Active members view channels" ON public.club_channels;
+DROP POLICY IF EXISTS "Audience can view channels" ON public.club_channels;
+CREATE POLICY "Audience can view channels" ON public.club_channels
+  FOR SELECT TO authenticated
+  USING (
+    type = 'announcements' OR
+    EXISTS (
+      SELECT 1 FROM public.club_memberships cm
+      WHERE cm.club_id = club_channels.club_id AND cm.user_id = auth.uid() AND cm.status = 'active'
+    ) OR
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+  );
+
+-- E. CHANNEL MESSAGES AUDIENCE POLICY (ANNOUNCEMENTS & DISCUSSIONS)
 DROP POLICY IF EXISTS "Active members view messages" ON public.channel_messages;
+DROP POLICY IF EXISTS "Active members view channel messages" ON public.channel_messages;
 DROP POLICY IF EXISTS "Audience can view channel messages" ON public.channel_messages;
 CREATE POLICY "Audience can view channel messages" ON public.channel_messages
   FOR SELECT TO authenticated
@@ -2466,5 +2507,31 @@ $$;
 
 REVOKE ALL ON FUNCTION public.audit_student_directory_integrity() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.audit_student_directory_integrity() TO authenticated;
+
+-- Ensure enforce_club_membership_defaults safely accommodates service role and administrative test fixtures
+CREATE OR REPLACE FUNCTION public.enforce_club_membership_defaults()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_caller_role TEXT;
+BEGIN
+  IF auth.uid() IS NULL OR auth.role() = 'service_role' THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT college_role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
+
+  IF v_caller_role IS DISTINCT FROM 'college_admin' THEN
+    NEW.user_id := auth.uid();
+    NEW.role := 'member';
+    NEW.status := 'pending';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
 
 

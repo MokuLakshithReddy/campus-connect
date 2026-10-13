@@ -62,8 +62,19 @@ async function withAuthenticatedSession(client, userId, callback) {
 
 async function bootstrapEnvironment(client) {
   await client.query(`
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
-    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE SCHEMA IF NOT EXISTS extensions;
+    GRANT USAGE ON SCHEMA extensions TO postgres, authenticated, anon, service_role, public;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto') THEN
+        CREATE EXTENSION pgcrypto WITH SCHEMA public;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp') THEN
+        CREATE EXTENSION "uuid-ossp" WITH SCHEMA public;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
 
     DO $$
     BEGIN
@@ -191,6 +202,13 @@ async function resetPublicSchema(client) {
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
         GRANT USAGE, CREATE ON SCHEMA public TO anon;
       END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto') THEN
+        CREATE EXTENSION pgcrypto WITH SCHEMA public;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp') THEN
+        CREATE EXTENSION "uuid-ossp" WITH SCHEMA public;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN NULL;
     END $$;
   `);
 }
@@ -674,6 +692,176 @@ async function runSecurityTestSuite(client, testContextName) {
       passed++;
     } else {
       throw new Error(`Feed audience check failed: user2 saw ${JSON.stringify(user2EventIds)}`);
+    }
+
+    // TEST 17: First-Time Password Requirement Bypass Prevention
+    total++;
+    process.stdout.write('[Test 17] Testing first-time password requirement (RPC bypass blocked, server trigger verified)... ');
+    const pwdTestUserId = crypto.randomUUID();
+    await client.query(`
+      INSERT INTO auth.users (id, email, encrypted_password)
+      VALUES ('${pwdTestUserId}', 'pwd_test@campus.internal', 'initial_hash_123');
+    `);
+    await client.query(`
+      INSERT INTO public.profiles (id, username, student_id, college_role, is_verified, must_change_password)
+      VALUES ('${pwdTestUserId}', 'pwd_tester', '25MVCSPWD123', 'student', false, true)
+      ON CONFLICT (id) DO UPDATE SET must_change_password = true;
+    `);
+
+    // A. Attempt to call complete_first_time_password_change() WITHOUT updating password
+    let pwdBypassBlocked = false;
+    try {
+      await withAuthenticatedSession(client, pwdTestUserId, async () => {
+        await client.query(`SELECT public.complete_first_time_password_change();`);
+      });
+    } catch (err) {
+      if (err.message.includes('Password has not been updated yet') || err.message.includes('You must complete a password update')) {
+        pwdBypassBlocked = true;
+      }
+    }
+
+    // Verify flag remained true in database
+    const profCheck1 = await client.query(`SELECT must_change_password FROM public.profiles WHERE id = '${pwdTestUserId}';`);
+    const flagStillTrue = profCheck1.rows[0]?.must_change_password === true;
+
+    // B. Simulate genuine password change on auth.users
+    await client.query(`
+      UPDATE auth.users
+      SET encrypted_password = 'new_updated_hash_456'
+      WHERE id = '${pwdTestUserId}';
+    `);
+
+    // Verify trigger cleared must_change_password automatically
+    const profCheck2 = await client.query(`SELECT must_change_password FROM public.profiles WHERE id = '${pwdTestUserId}';`);
+    const flagCleared = profCheck2.rows[0]?.must_change_password === false;
+
+    // Clean up pwd test user
+    await client.query(`DELETE FROM auth.users WHERE id = '${pwdTestUserId}';`);
+
+    if (pwdBypassBlocked && flagStillTrue && flagCleared) {
+      console.log('PASSED (RPC bypass blocked; flag cleared only upon real auth password update)');
+      passed++;
+    } else {
+      throw new Error(`Password requirement check failed: bypassBlocked=${pwdBypassBlocked}, flagStillTrue=${flagStillTrue}, flagCleared=${flagCleared}`);
+    }
+
+    // TEST 18: Student Privacy via Table Joins and Anonymous RLS
+    total++;
+    process.stdout.write('[Test 18] Testing privacy against table joins and anonymous access... ');
+    let joinPrivacyDenied = false;
+    try {
+      await withAuthenticatedSession(client, user2Id, async () => {
+        // Attempting to leak student_id by joining public.posts with public.profiles
+        await client.query(`SELECT p.student_id FROM public.posts JOIN public.profiles p ON posts.user_id = p.id;`);
+      });
+    } catch (err) {
+      if (err.message.includes('permission denied for column student_id') || err.message.includes('permission denied')) {
+        joinPrivacyDenied = true;
+      }
+    }
+
+    // Anonymous query under RLS
+    let anonAccessDenied = false;
+    let anonSeesZero = false;
+    try {
+      await client.query(`BEGIN; SET LOCAL ROLE anon;`);
+      const anonProfiles = await client.query(`SELECT count(*) AS cnt FROM public.profiles;`);
+      await client.query(`COMMIT;`);
+      anonSeesZero = parseInt(anonProfiles.rows[0].cnt, 10) === 0;
+    } catch (err) {
+      await client.query(`ROLLBACK;`).catch(() => {});
+      if (err.message.includes('permission denied for table profiles') || err.message.includes('permission denied') || err.message.includes('42501')) {
+        anonAccessDenied = true;
+      }
+    }
+
+    if (joinPrivacyDenied && (anonSeesZero || anonAccessDenied)) {
+      console.log('PASSED (Join queries to student_id denied; anonymous access blocked from profiles table)');
+      passed++;
+    } else {
+      throw new Error(`Join/anon privacy failed: joinDenied=${joinPrivacyDenied}, anonSeesZero=${anonSeesZero}, anonDenied=${anonAccessDenied}`);
+    }
+
+    // TEST 19: Channel Messages Audience and Membership Isolation
+    total++;
+    process.stdout.write('[Test 19] Testing channel message isolation (active members vs pending/rejected/non-members)... ');
+    const msgClubId = crypto.randomUUID();
+    const genChannelId = crypto.randomUUID();
+    const annChannelId = crypto.randomUUID();
+    const pendingUserId = crypto.randomUUID();
+    const rejectedUserId = crypto.randomUUID();
+    const genMsgId = crypto.randomUUID();
+    const annMsgId = crypto.randomUUID();
+
+    // Setup club, channels, and users
+    await client.query(`
+      INSERT INTO auth.users (id, email) VALUES 
+        ('${pendingUserId}', 'pending@campus.internal'),
+        ('${rejectedUserId}', 'rejected@campus.internal');
+      INSERT INTO public.clubs (id, name, slug, category, status, content_visibility, created_by, branch_id)
+      VALUES ('${msgClubId}', 'Msg Test Club ${msgClubId.slice(0, 6)}', 'msg-club-${msgClubId.slice(0, 8)}', 'Technical', 'active', 'college', '${user1Id}', '${aimlBranchId}');
+      
+      INSERT INTO public.club_channels (id, club_id, name, type) VALUES
+        ('${genChannelId}', '${msgClubId}', 'general', 'general'),
+        ('${annChannelId}', '${msgClubId}', 'announcements', 'announcements');
+
+      -- User 1 is active member; pendingUserId is pending; rejectedUserId is rejected
+      INSERT INTO public.club_memberships (club_id, user_id, role, status) VALUES
+        ('${msgClubId}', '${user1Id}', 'member', 'active'),
+        ('${msgClubId}', '${pendingUserId}', 'member', 'pending'),
+        ('${msgClubId}', '${rejectedUserId}', 'member', 'rejected');
+
+      -- Post messages
+      INSERT INTO public.channel_messages (id, channel_id, sender_id, content, content_visibility, branch_id) VALUES
+        ('${genMsgId}', '${genChannelId}', '${user1Id}', 'Secret internal discussion', 'club_members', NULL),
+        ('${annMsgId}', '${annChannelId}', '${user1Id}', 'Public campus announcement', 'college', NULL);
+    `);
+
+    // Active member queries general message
+    const user1GenMsgs = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';`);
+    });
+
+    // Pending member queries general message
+    const pendingGenMsgs = await withAuthenticatedSession(client, pendingUserId, async () => {
+      return await client.query(`SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';`);
+    });
+
+    // Rejected member queries general message
+    const rejectedGenMsgs = await withAuthenticatedSession(client, rejectedUserId, async () => {
+      return await client.query(`SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';`);
+    });
+
+    // Non-member queries general message
+    const nonMemberGenMsgs = await withAuthenticatedSession(client, user2Id, async () => {
+      return await client.query(`SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';`);
+    });
+
+    // All can read announcement message
+    const user2AnnMsgs = await withAuthenticatedSession(client, user2Id, async () => {
+      return await client.query(`SELECT id FROM public.channel_messages WHERE id = '${annMsgId}';`);
+    });
+
+    const channelIsolationPassed = user1GenMsgs.rows.length === 1 &&
+                                   pendingGenMsgs.rows.length === 0 &&
+                                   rejectedGenMsgs.rows.length === 0 &&
+                                   nonMemberGenMsgs.rows.length === 0 &&
+                                   user2AnnMsgs.rows.length === 1;
+
+    // Cleanup channel test fixtures
+    await client.query(`
+      DELETE FROM public.channel_messages WHERE id IN ('${genMsgId}', '${annMsgId}');
+      DELETE FROM public.club_channels WHERE id IN ('${genChannelId}', '${annChannelId}');
+      DELETE FROM public.club_memberships WHERE club_id = '${msgClubId}';
+      DELETE FROM public.clubs WHERE id = '${msgClubId}';
+      DELETE FROM auth.users WHERE id IN ('${pendingUserId}', '${rejectedUserId}');
+    `);
+
+    if (channelIsolationPassed) {
+      console.log('PASSED (Active members see discussions; pending/rejected/non-members blocked; public announcements accessible)');
+      passed++;
+    } else {
+      throw new Error(`Channel message isolation failed: user1=${user1GenMsgs.rows.length}, pending=${pendingGenMsgs.rows.length}, rejected=${rejectedGenMsgs.rows.length}, nonMember=${nonMemberGenMsgs.rows.length}`);
     }
 
     console.log(`\n>> Result for [${testContextName}]: ${passed}/${total} tests PASSED.`);

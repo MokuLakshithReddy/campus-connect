@@ -209,16 +209,21 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_caller_id UUID := auth.uid();
+  v_must_change BOOLEAN;
 BEGIN
   IF v_caller_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
   END IF;
 
-  PERFORM set_config('campus.in_password_change', 'true', true);
-
-  UPDATE public.profiles
-  SET must_change_password = false, updated_at = NOW()
+  SELECT must_change_password INTO v_must_change
+  FROM public.profiles
   WHERE id = v_caller_id;
+
+  -- Security rule: The flag is automatically cleared server-side by public.handle_auth_user_password_changed() trigger on auth.users.
+  -- Direct client invocations without updating the password in auth.users are rejected.
+  IF COALESCE(v_must_change, true) THEN
+    RAISE EXCEPTION 'Password has not been updated yet. You must complete a password update via the auth service before this requirement can be cleared.';
+  END IF;
 
   RETURN jsonb_build_object('success', true, 'message', 'Password change completed successfully');
 END;

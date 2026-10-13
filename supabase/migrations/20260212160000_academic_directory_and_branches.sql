@@ -298,7 +298,15 @@ REVOKE ALL ON FUNCTION public.protect_profile_academic_fields() FROM PUBLIC;
 REVOKE UPDATE ON public.profiles FROM authenticated;
 GRANT UPDATE (username, bio, avatar_url, updated_at) ON public.profiles TO authenticated;
 
+-- RLS Policy: Only authenticated users can select profiles (anonymous access returns 0 profiles)
+DROP POLICY IF EXISTS "Anyone can view profiles" ON public.profiles;
+DROP POLICY IF EXISTS "Authenticated users view profiles" ON public.profiles;
+CREATE POLICY "Authenticated users view profiles" ON public.profiles
+  FOR SELECT TO authenticated
+  USING (true);
+
 -- Privacy protection: Prevent direct reading of sensitive student roll numbers (student_id) across all profiles
+REVOKE ALL ON public.profiles FROM PUBLIC, anon;
 REVOKE SELECT ON public.profiles FROM authenticated, anon;
 GRANT SELECT (
   id,
@@ -312,7 +320,7 @@ GRANT SELECT (
   is_verified,
   created_at,
   updated_at
-) ON public.profiles TO authenticated, anon;
+) ON public.profiles TO authenticated;
 
 -- Dedicated secure RPC for authenticated users to view their own full profile including student_id
 CREATE OR REPLACE FUNCTION public.get_my_profile()
@@ -762,8 +770,23 @@ CREATE POLICY "Audience can view clubs" ON public.clubs
     ))
   );
 
--- D. CHANNEL MESSAGES AUDIENCE POLICY (ANNOUNCEMENTS & DISCUSSIONS)
+-- D. CLUB CHANNELS AUDIENCE POLICY
+DROP POLICY IF EXISTS "Active members view channels" ON public.club_channels;
+DROP POLICY IF EXISTS "Audience can view channels" ON public.club_channels;
+CREATE POLICY "Audience can view channels" ON public.club_channels
+  FOR SELECT TO authenticated
+  USING (
+    type = 'announcements' OR
+    EXISTS (
+      SELECT 1 FROM public.club_memberships cm
+      WHERE cm.club_id = club_channels.club_id AND cm.user_id = auth.uid() AND cm.status = 'active'
+    ) OR
+    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+  );
+
+-- E. CHANNEL MESSAGES AUDIENCE POLICY (ANNOUNCEMENTS & DISCUSSIONS)
 DROP POLICY IF EXISTS "Active members view messages" ON public.channel_messages;
+DROP POLICY IF EXISTS "Active members view channel messages" ON public.channel_messages;
 DROP POLICY IF EXISTS "Audience can view channel messages" ON public.channel_messages;
 CREATE POLICY "Audience can view channel messages" ON public.channel_messages
   FOR SELECT TO authenticated
@@ -1128,3 +1151,29 @@ $$;
 
 REVOKE ALL ON FUNCTION public.audit_student_directory_integrity() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.audit_student_directory_integrity() TO authenticated;
+
+-- Ensure enforce_club_membership_defaults safely accommodates service role and administrative test fixtures
+CREATE OR REPLACE FUNCTION public.enforce_club_membership_defaults()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_caller_role TEXT;
+BEGIN
+  IF auth.uid() IS NULL OR auth.role() = 'service_role' THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT college_role INTO v_caller_role FROM public.profiles WHERE id = auth.uid();
+
+  IF v_caller_role IS DISTINCT FROM 'college_admin' THEN
+    NEW.user_id := auth.uid();
+    NEW.role := 'member';
+    NEW.status := 'pending';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+

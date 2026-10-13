@@ -81,12 +81,35 @@ CREATE TABLE IF NOT EXISTS public.events (
 );
 
 -- 7. EVENT REGISTRATIONS TABLE
+DO $$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pgcrypto;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.generate_qr_token()
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  BEGIN
+    RETURN encode(public.gen_random_bytes(16), 'hex');
+  EXCEPTION WHEN OTHERS THEN
+    BEGIN
+      RETURN encode(extensions.gen_random_bytes(16), 'hex');
+    EXCEPTION WHEN OTHERS THEN
+      RETURN replace(pg_catalog.gen_random_uuid()::text, '-', '');
+    END;
+  END;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS public.event_registrations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id UUID NOT NULL REFERENCES public.events(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'registered' CHECK (status IN ('registered', 'attended', 'cancelled')),
-  qr_code_token TEXT NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(16), 'hex'),
+  qr_code_token TEXT NOT NULL UNIQUE DEFAULT public.generate_qr_token(),
   registered_at TIMESTAMPTZ DEFAULT now(),
   attended_at TIMESTAMPTZ,
   UNIQUE (event_id, user_id)

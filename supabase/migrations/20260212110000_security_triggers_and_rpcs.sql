@@ -516,7 +516,7 @@ BEGIN
       END IF;
 
       UPDATE public.event_registrations
-      SET status = 'registered', qr_code_token = encode(gen_random_bytes(16), 'hex')
+      SET status = 'registered', qr_code_token = public.generate_qr_token()
       WHERE id = v_existing_reg.id
       RETURNING * INTO v_new_reg;
 

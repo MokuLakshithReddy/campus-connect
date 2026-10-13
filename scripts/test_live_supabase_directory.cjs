@@ -537,6 +537,208 @@ async function runTestSuite() {
       throw new Error(`Feed audience check failed: user2 saw ${JSON.stringify(user2EventIds)}`);
     }
 
+    // 15. First-Time Password Requirement Bypass Prevention
+    total++;
+    process.stdout.write('[Test 15] Testing first-time password requirement (RPC bypass blocked, server trigger verified)... ');
+    const pwdTestUserId = crypto.randomUUID();
+    await querySql(`
+      INSERT INTO auth.users (id, email, encrypted_password)
+      VALUES ('${pwdTestUserId}', 'pwd_live_test@campus.internal', 'initial_hash_123');
+      INSERT INTO public.profiles (id, username, student_id, college_role, is_verified, must_change_password)
+      VALUES ('${pwdTestUserId}', 'pwd_live_tester', '25MVCSPWD999', 'student', false, true)
+      ON CONFLICT (id) DO UPDATE SET must_change_password = true;
+    `);
+
+    // A. Attempt to call complete_first_time_password_change() WITHOUT updating password
+    let pwdBypassBlocked = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${pwdTestUserId}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT public.complete_first_time_password_change();
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('Password has not been updated yet') || err.message.includes('You must complete a password update')) {
+        pwdBypassBlocked = true;
+      }
+    }
+
+    // Verify flag remained true in database
+    const profCheck1 = await querySql(`SELECT must_change_password FROM public.profiles WHERE id = '${pwdTestUserId}';`);
+    const flagStillTrue = profCheck1[0]?.must_change_password === true;
+
+    // B. Simulate genuine password change on auth.users
+    await querySql(`
+      UPDATE auth.users
+      SET encrypted_password = 'new_updated_hash_live_456'
+      WHERE id = '${pwdTestUserId}';
+    `);
+
+    // Verify trigger cleared must_change_password automatically
+    const profCheck2 = await querySql(`SELECT must_change_password FROM public.profiles WHERE id = '${pwdTestUserId}';`);
+    const flagCleared = profCheck2[0]?.must_change_password === false;
+
+    // Clean up pwd test user
+    await querySql(`DELETE FROM auth.users WHERE id = '${pwdTestUserId}';`);
+
+    if (pwdBypassBlocked && flagStillTrue && flagCleared) {
+      console.log('PASSED (RPC bypass blocked; flag cleared only upon real auth password update)');
+      passed++;
+    } else {
+      throw new Error(`Password requirement check failed: bypassBlocked=${pwdBypassBlocked}, flagStillTrue=${flagStillTrue}, flagCleared=${flagCleared}`);
+    }
+
+    // 16. Student Privacy via Table Joins and Anonymous RLS
+    total++;
+    process.stdout.write('[Test 16] Testing privacy against table joins and anonymous access... ');
+    let joinPrivacyDenied = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user2Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT p.student_id FROM public.posts JOIN public.profiles p ON posts.user_id = p.id;
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('permission denied for column student_id') || err.message.includes('permission denied')) {
+        joinPrivacyDenied = true;
+      }
+    }
+
+    // Anonymous query under RLS
+    let anonAccessDenied = false;
+    let anonSeesZero = false;
+    try {
+      const anonProfiles = await querySql(`
+        BEGIN;
+        SET LOCAL ROLE anon;
+        SELECT count(*) AS cnt FROM public.profiles;
+        COMMIT;
+      `);
+      anonSeesZero = parseInt(anonProfiles[0]?.cnt, 10) === 0;
+    } catch (err) {
+      if (err.message.includes('permission denied for table profiles') || err.message.includes('permission denied') || err.message.includes('42501')) {
+        anonAccessDenied = true;
+      }
+    }
+
+    if (joinPrivacyDenied && (anonSeesZero || anonAccessDenied)) {
+      console.log('PASSED (Join queries to student_id denied; anonymous access blocked from profiles table)');
+      passed++;
+    } else {
+      throw new Error(`Join/anon privacy failed: joinDenied=${joinPrivacyDenied}, anonSeesZero=${anonSeesZero}, anonDenied=${anonAccessDenied}`);
+    }
+
+    // 17. Channel Messages Audience and Membership Isolation
+    total++;
+    process.stdout.write('[Test 17] Testing channel message isolation (active members vs pending/rejected/non-members)... ');
+    const msgClubId = crypto.randomUUID();
+    const genChannelId = crypto.randomUUID();
+    const annChannelId = crypto.randomUUID();
+    const pendingUserId = crypto.randomUUID();
+    const rejectedUserId = crypto.randomUUID();
+    const genMsgId = crypto.randomUUID();
+    const annMsgId = crypto.randomUUID();
+
+    // Setup club, channels, and users
+    await querySql(`
+      INSERT INTO auth.users (id, email) VALUES 
+        ('${pendingUserId}', 'pending_live@campus.internal'),
+        ('${rejectedUserId}', 'rejected_live@campus.internal');
+      INSERT INTO public.clubs (id, name, slug, category, status, content_visibility, created_by, branch_id)
+      VALUES ('${msgClubId}', 'Msg Test Club ${msgClubId.slice(0, 6)}', 'msg-club-${msgClubId.slice(0, 8)}', 'Technical', 'active', 'college', '${user1Id}', '${aimlBranchId}');
+      
+      INSERT INTO public.club_channels (id, club_id, name, type) VALUES
+        ('${genChannelId}', '${msgClubId}', 'general', 'general'),
+        ('${annChannelId}', '${msgClubId}', 'announcements', 'announcements');
+
+      INSERT INTO public.club_memberships (club_id, user_id, role, status) VALUES
+        ('${msgClubId}', '${user1Id}', 'member', 'active'),
+        ('${msgClubId}', '${pendingUserId}', 'member', 'pending'),
+        ('${msgClubId}', '${rejectedUserId}', 'member', 'rejected');
+
+      INSERT INTO public.channel_messages (id, channel_id, sender_id, content, content_visibility, branch_id) VALUES
+        ('${genMsgId}', '${genChannelId}', '${user1Id}', 'Secret internal discussion', 'club_members', NULL),
+        ('${annMsgId}', '${annChannelId}', '${user1Id}', 'Public campus announcement', 'college', NULL);
+    `);
+
+    // Active member queries general message
+    const user1GenMsgs = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user1Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';
+      COMMIT;
+    `);
+
+    // Pending member queries general message
+    const pendingGenMsgs = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${pendingUserId}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';
+      COMMIT;
+    `);
+
+    // Rejected member queries general message
+    const rejectedGenMsgs = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${rejectedUserId}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';
+      COMMIT;
+    `);
+
+    // Non-member queries general message
+    const nonMemberGenMsgs = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user2Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT id FROM public.channel_messages WHERE id = '${genMsgId}';
+      COMMIT;
+    `);
+
+    // All can read announcement message
+    const user2AnnMsgs = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user2Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT id FROM public.channel_messages WHERE id = '${annMsgId}';
+      COMMIT;
+    `);
+
+    const channelIsolationPassed = user1GenMsgs.length === 1 &&
+                                   pendingGenMsgs.length === 0 &&
+                                   rejectedGenMsgs.length === 0 &&
+                                   nonMemberGenMsgs.length === 0 &&
+                                   user2AnnMsgs.length === 1;
+
+    // Cleanup channel test fixtures
+    await querySql(`
+      DELETE FROM public.channel_messages WHERE id IN ('${genMsgId}', '${annMsgId}');
+      DELETE FROM public.club_channels WHERE id IN ('${genChannelId}', '${annChannelId}');
+      DELETE FROM public.club_memberships WHERE club_id = '${msgClubId}';
+      DELETE FROM public.clubs WHERE id = '${msgClubId}';
+      DELETE FROM auth.users WHERE id IN ('${pendingUserId}', '${rejectedUserId}');
+    `);
+
+    if (channelIsolationPassed) {
+      console.log('PASSED (Active members see discussions; pending/rejected/non-members blocked; public announcements accessible)');
+      passed++;
+    } else {
+      throw new Error(`Channel message isolation failed: user1=${user1GenMsgs.length}, pending=${pendingGenMsgs.length}, rejected=${rejectedGenMsgs.length}, nonMember=${nonMemberGenMsgs.length}`);
+    }
+
     console.log('\n================================================================================');
     console.log(`ALL TESTS PASSED: ${passed}/${total} live integration tests successful.`);
     console.log('================================================================================\n');

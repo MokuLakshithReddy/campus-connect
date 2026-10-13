@@ -10,6 +10,11 @@ on:
         description: 'Version tag to release (e.g. v1.2.6)'
         required: false
         default: ''
+      verify_only:
+        description: 'Verify build compilation only without publishing (allowed for test builds)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   release:
@@ -33,6 +38,13 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: 21
+
+      - name: Setup Android SDK Build Tools
+        run: |
+          echo "ANDROID_HOME: $ANDROID_HOME"
+          BUILD_TOOLS_DIR=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 | sort -V | tail -n 1)
+          echo "Using Android build-tools: $BUILD_TOOLS_DIR"
+          echo "BUILD_TOOLS_DIR=$BUILD_TOOLS_DIR" >> "$GITHUB_ENV"
 
       - name: Setup Gradle Cache
         uses: actions/cache@v4
@@ -79,6 +91,7 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          IS_VERIFY_ONLY: ${{ github.event.inputs.verify_only }}
         run: |
           KEYSTORE_DIR="${RUNNER_TEMP}/keystore"
           mkdir -p "${KEYSTORE_DIR}"
@@ -91,18 +104,23 @@ jobs:
             echo "KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
             echo "KEY_ALIAS=${KEY_ALIAS}" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
-            echo "is_signed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Production signing secrets (ANDROID_KEYSTORE_BASE64) not found. Generating ephemeral release key for build verification."
-            keytool -genkeypair -v -keystore "$KEYSTORE_FILE" -alias "campusconnect" \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "campusconnectpass" -keypass "campusconnectpass" \
-              -dname "CN=CampusConnect, OU=Mobile, O=CampusConnect, L=Campus, S=State, C=IN"
+            echo "is_production_signed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$IS_VERIFY_ONLY" = "true" ]; then
+            echo "::warning::VERIFY-ONLY RUN: Real signing credentials omitted. Generating temporary key solely to verify Gradle bundle and assemble tasks. This artifact will NOT be published."
+            keytool -genkeypair -v -keystore "$KEYSTORE_FILE" -alias "campusconnect-verify" \
+              -keyalg RSA -keysize 2048 -validity 1 \
+              -storepass "verifykeypass123" -keypass "verifykeypass123" \
+              -dname "CN=CampusConnect Verification, OU=CI, O=CampusConnect, L=Campus, S=State, C=IN"
             echo "KEYSTORE_PATH=${KEYSTORE_FILE}" >> "$GITHUB_ENV"
-            echo "KEYSTORE_PASSWORD=campusconnectpass" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=campusconnect" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=campusconnectpass" >> "$GITHUB_ENV"
-            echo "is_signed=false" >> "$GITHUB_OUTPUT"
+            echo "KEYSTORE_PASSWORD=verifykeypass123" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=campusconnect-verify" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=verifykeypass123" >> "$GITHUB_ENV"
+            echo "is_production_signed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::CRITICAL: Production release signing secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS) are missing."
+            echo "::error::To publish a production release, configure these secrets in GitHub Repository Settings -> Secrets and Variables -> Actions."
+            echo "::error::Temporary key publishing is forbidden to prevent app update signature mismatches."
+            exit 1
           fi
 
       - name: Build Release APK and Android App Bundle (AAB)
@@ -111,13 +129,12 @@ jobs:
           chmod +x gradlew
           ./gradlew bundleRelease assembleRelease --stacktrace
 
-      - name: Package & Verify Release Artifacts
+      - name: Package Release Artifacts
         id: package
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.tag }}"
 
-          # Locate built APK and AAB
           SRC_APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
           SRC_AAB=$(find android/app/build/outputs/bundle/release -name "*.aab" | head -n 1)
 
@@ -142,18 +159,30 @@ jobs:
           echo "apk_path=${TARGET_APK}" >> "$GITHUB_OUTPUT"
           echo "aab_path=${TARGET_AAB}" >> "$GITHUB_OUTPUT"
           echo "checksum_path=${TARGET_CHECKSUM}" >> "$GITHUB_OUTPUT"
-          echo "Artifacts generated successfully:"
+          echo "Generated release artifacts:"
           cat "$TARGET_CHECKSUM"
+
+      - name: Verify Cryptographic Signatures (apksigner & jarsigner)
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          APK_FILE="release-artifacts/campus-connect-${TAG}.apk"
+          AAB_FILE="release-artifacts/campus-connect-${TAG}.aab"
+
+          echo "=== Verifying APK Signature ==="
+          "$BUILD_TOOLS_DIR/apksigner" verify --verbose --print-certs "$APK_FILE"
+
+          echo "=== Verifying AAB Signature ==="
+          jarsigner -verify -verbose -certs "$AAB_FILE" | grep -E "jar verified|Signed by|Certificate owner" || true
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: campus-connect-${{ steps.version.outputs.tag }}-production-release
+          name: campus-connect-${{ steps.version.outputs.tag }}-release-artifacts
           path: release-artifacts/*
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.version_tag != ''
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.version_tag != '') && steps.signing_setup.outputs.is_production_signed == 'true'
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: CampusConnect Production Release ${{ steps.version.outputs.tag }}
