@@ -283,8 +283,8 @@ async function runSecurityTestSuite(client, testContextName) {
     await client.query(`
       INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data)
       VALUES 
-        ($1, 'authenticated', 'authenticated', $3, json_build_object('username', $4, 'student_id', $5)),
-        ($2, 'authenticated', 'authenticated', $6, json_build_object('username', $7, 'student_id', $5));
+        ($1::uuid, 'authenticated', 'authenticated', $3::text, json_build_object('username', $4::text, 'student_id', $5::text)),
+        ($2::uuid, 'authenticated', 'authenticated', $6::text, json_build_object('username', $7::text, 'student_id', $5::text));
     `, [
       user1Id,
       user2Id,
@@ -296,7 +296,7 @@ async function runSecurityTestSuite(client, testContextName) {
     ]);
 
     await client.query(`
-      UPDATE public.profiles SET student_id = $1 WHERE id IN ($2, $3);
+      UPDATE public.profiles SET student_id = $1::text WHERE id = $2::uuid OR id = $3::uuid;
     `, [testRoll, user1Id, user2Id]);
 
     // TEST 3: User 1 Directory Linking Flow with Transactional Identity
@@ -387,7 +387,7 @@ async function runSecurityTestSuite(client, testContextName) {
     // 1. Create corresponding auth user first to satisfy foreign-key constraint
     await client.query(`
       INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data)
-      VALUES ($1, 'authenticated', 'authenticated', $2, json_build_object('username', $3));
+      VALUES ($1::uuid, 'authenticated', 'authenticated', $2::text, json_build_object('username', $3::text));
     `, [evilUserId, `evil_${testRunId}@ci.test`, `evil_${testRunId}`]);
 
     // 2. Remove auto-created profile so we can test the explicit INSERT path
@@ -888,7 +888,7 @@ async function runSecurityTestSuite(client, testContextName) {
     // Step B: Account provisioning in auth.users
     await client.query(`
       INSERT INTO auth.users (id, email, encrypted_password, raw_user_meta_data)
-      VALUES ($1, $2, 'temp_hash', $3);
+      VALUES ($1::uuid, $2::text, 'temp_hash', $3::jsonb);
     `, [e2eUserId, `${e2eRoll.toLowerCase()}@campus.internal`, JSON.stringify({
       username: e2eRoll,
       student_id: e2eRoll,
@@ -949,7 +949,7 @@ async function runSecurityTestSuite(client, testContextName) {
       await client.query(`DELETE FROM public.student_directory WHERE roll_number = $1;`, [testRoll]);
     } catch (e) {}
     try {
-      await client.query(`DELETE FROM auth.users WHERE id IN ($1, $2, $3);`, [user1Id, user2Id, evilUserId]);
+      await client.query(`DELETE FROM auth.users WHERE id = $1::uuid OR id = $2::uuid OR id = $3::uuid;`, [user1Id, user2Id, evilUserId]);
     } catch (e) {}
   }
 }
