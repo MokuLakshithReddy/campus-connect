@@ -27,7 +27,7 @@ import AuthErrorScreen from "@/components/AuthErrorScreen";
 const queryClient = new QueryClient();
 
 // Protected pages require an authenticated user with a loaded profile.
-const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+export const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
@@ -62,7 +62,7 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
 };
 
 // Guard for the Mandatory Change Password screen
-const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) => {
+export const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) => {
   const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (
@@ -98,7 +98,7 @@ const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) =
 };
 
 // Unauthenticated Route Guard
-const AuthRoute = ({ children }: { children: React.ReactNode }) => {
+export const AuthRoute = ({ children }: { children: React.ReactNode }) => {
   const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
   if (loading) {
     return (

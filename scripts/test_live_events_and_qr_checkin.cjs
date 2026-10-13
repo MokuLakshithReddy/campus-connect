@@ -176,12 +176,12 @@ async function runLiveEventsTestSuite() {
     const winningReg = isRegistrationSuccess(attempt1) ? attempt1.value[0].res : attempt2.value[0].res;
     const losingAttempt = isRegistrationSuccess(attempt1) ? attempt2 : attempt1;
 
-    // Verify the losing result specifically reported capacity limit
+    // Verify the losing result specifically reported the documented capacity limit outcome
     const failureMsg = losingAttempt.status === 'rejected'
       ? losingAttempt.reason?.message || ''
       : losingAttempt.value?.[0]?.res?.error || '';
     if (!/capacity|full|limit|seat/i.test(failureMsg)) {
-      console.warn(`[Notice] Losing attempt rejected with message: '${failureMsg}'`);
+      throw new Error(`Losing attempt was not rejected with documented capacity limit outcome. Actual error: '${failureMsg}'`);
     }
 
     // Sub-test: Loser launches 2 concurrent retry attempts while capacity is full
@@ -208,6 +208,17 @@ async function runLiveEventsTestSuite() {
     const retryFailures = [retry1, retry2].filter(isRegistrationFailure);
     if (retrySuccesses.length !== 0 || retryFailures.length !== 2) {
       throw new Error(`Concurrent retry erroneously claimed seat when capacity is full! successes=${retrySuccesses.length}, failures=${retryFailures.length}`);
+    }
+
+    // Enforce that both retry rejections strictly reported the documented capacity limit outcome
+    for (let i = 0; i < retryFailures.length; i++) {
+      const retryResult = retryFailures[i];
+      const retryMsg = retryResult.status === 'rejected'
+        ? retryResult.reason?.message || ''
+        : retryResult.value?.[0]?.res?.error || '';
+      if (!/capacity|full|limit|seat/i.test(retryMsg)) {
+        throw new Error(`Retry attempt #${i + 1} was not rejected with documented capacity limit outcome. Actual error: '${retryMsg}'`);
+      }
     }
 
     // =========================================================================
@@ -435,12 +446,17 @@ async function runLiveEventsTestSuite() {
     const reclaimSuccesses = [reclaim1, reclaim2].filter(isRegistrationSuccess);
     const reclaimFailures = [reclaim1, reclaim2].filter(isRegistrationFailure);
 
-    // Direct DB state verification: registration count must be exactly 1, capacity 1
-    const finalCountRes = await querySql(`SELECT COUNT(*)::int AS count FROM public.event_registrations WHERE event_id = '${eventId}' AND status = 'registered';`);
-    const finalRegisteredCount = parseInt(finalCountRes[0].count);
+    // Enforce that losing reclaim attempt specifically reported documented capacity limit outcome
+    const losingReclaim = reclaimFailures[0];
+    const reclaimFailureMsg = losingReclaim.status === 'rejected'
+      ? losingReclaim.reason?.message || ''
+      : losingReclaim.value?.[0]?.res?.error || '';
+    if (!/capacity|full|limit|seat/i.test(reclaimFailureMsg)) {
+      throw new Error(`Reclaim losing attempt was not rejected with documented capacity limit outcome. Actual error: '${reclaimFailureMsg}'`);
+    }
 
     if (reclaimSuccesses.length === 1 && reclaimFailures.length === 1 && finalRegisteredCount === 1) {
-      console.log('PASSED (Cancellation freed seat; concurrent race produced exactly 1 registration; capacity never exceeded)');
+      console.log('PASSED (Cancellation freed seat; concurrent race produced exactly 1 registration; capacity never exceeded; rejection verified)');
       passed++;
     } else {
       throw new Error(`Concurrent seat reopening race failed: successes=${reclaimSuccesses.length}, failures=${reclaimFailures.length}, finalCount=${finalRegisteredCount}`);

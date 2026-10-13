@@ -4,6 +4,7 @@
  * Example: SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs 25MVCSMR9A1B "CSE-AIML" "1st Year" "Student Name"
  */
 const https = require('https');
+const http = require('http');
 
 // Explicit target URL is required — no silent fallbacks to production
 const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
@@ -69,8 +70,14 @@ const email = `${rollNumber.toLowerCase()}@campus.internal`;
 const temporaryPassword = rollNumber; // Initial onboarding credential set to roll number
 
 function sendRequest(options, data) {
+  const isHttp = parsedUrl && parsedUrl.protocol === 'http:';
+  const client = isHttp ? http : https;
+  const reqOptions = {
+    ...options,
+    port: options.port || (parsedUrl && parsedUrl.port ? parseInt(parsedUrl.port, 10) : (isHttp ? 80 : 443))
+  };
   return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
+    const req = client.request(reqOptions, (res) => {
       let body = '';
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => {
@@ -230,7 +237,15 @@ async function provisionStudent() {
       }
     };
 
-    const linkedProfRes = await sendRequest(linkedProfileOptions);
+    let linkedProfRes;
+    try {
+      linkedProfRes = await sendRequest(linkedProfileOptions);
+    } catch (err) {
+      console.error(`ERROR: Directory linked-profile query network failure: ${err.message}`);
+      console.error(`Provisioning aborted. Fail-closed security requires verified confirmation that no conflicting profile exists.`);
+      process.exit(1);
+    }
+
     if (linkedProfRes.statusCode < 200 || linkedProfRes.statusCode >= 300 || !Array.isArray(linkedProfRes.body) || linkedProfRes.body.length === 0) {
       console.error(`ERROR: Directory record points to non-existent or inaccessible profile ${dirEntry.profile_id}.`);
       console.error(`Provisioning aborted to prevent orphaned or misattributed accounts.`);
@@ -263,8 +278,27 @@ async function provisionStudent() {
     }
   };
 
-  const existingProfRes = await sendRequest(existingProfileOptions);
-  if (existingProfRes.statusCode >= 200 && existingProfRes.statusCode < 300 && Array.isArray(existingProfRes.body) && existingProfRes.body.length > 0) {
+  let existingProfRes;
+  try {
+    existingProfRes = await sendRequest(existingProfileOptions);
+  } catch (err) {
+    console.error(`ERROR: Existing profile ownership query network failure: ${err.message}`);
+    console.error(`Provisioning aborted. Fail-closed security requires verified confirmation that no conflicting profile exists.`);
+    process.exit(1);
+  }
+
+  // Strict fail-closed check: require 2xx status AND array payload before proceeding.
+  // Any error, non-2xx status, or malformed payload MUST abort immediately before touching auth.
+  if (existingProfRes.statusCode < 200 || existingProfRes.statusCode >= 300 || !Array.isArray(existingProfRes.body)) {
+    const errorDetails = typeof existingProfRes.body === 'object' && existingProfRes.body?.message
+      ? existingProfRes.body.message
+      : existingProfRes.rawBody || `HTTP ${existingProfRes.statusCode}`;
+    console.error(`ERROR: Existing profile ownership query failed (${errorDetails}).`);
+    console.error(`Provisioning aborted. Fail-closed security requires verified confirmation that no conflicting profile exists.`);
+    process.exit(1);
+  }
+
+  if (existingProfRes.body.length > 0) {
     const existingProf = existingProfRes.body[0];
     if (!dirEntry.profile_id) {
       console.error(`ERROR: Ownership conflict! Profile ${existingProf.id} already exists for roll number ${rollNumber}, but official directory entry has profile_id = NULL.`);
@@ -278,6 +312,8 @@ async function provisionStudent() {
     }
     expectedUserId = existingProf.id;
     console.log(`- Verified: Profile ${existingProf.id} is uniquely and consistently associated with directory record.`);
+  } else {
+    console.log(`- Verified: No conflicting existing profile found for roll number ${rollNumber}.`);
   }
 
   // Step 4: Account provisioning in auth.users
