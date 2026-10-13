@@ -183,7 +183,7 @@ AS $$
 BEGIN
   INSERT INTO public.auth_login_audit (identifier, attempt_time, success, failure_reason)
   VALUES (
-    pg_catalog.lower(pg_catalog.trim(p_identifier)),
+    pg_catalog.lower(pg_catalog.btrim(p_identifier)),
     pg_catalog.clock_timestamp(),
     p_success,
     p_failure_reason
@@ -209,7 +209,7 @@ DECLARE
 BEGIN
   SELECT count(*) INTO v_recent_failures
   FROM public.auth_login_audit
-  WHERE identifier = pg_catalog.lower(pg_catalog.trim(p_identifier))
+  WHERE identifier = pg_catalog.lower(pg_catalog.btrim(p_identifier))
     AND success = false
     AND attempt_time > pg_catalog.clock_timestamp() - interval '15 minutes';
   
