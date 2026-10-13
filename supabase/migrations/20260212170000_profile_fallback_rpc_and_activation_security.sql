@@ -61,6 +61,7 @@ REVOKE ALL ON FUNCTION public.get_my_profile_fallback() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.get_my_profile_fallback() TO authenticated;
 
 -- UPDATE PRIMARY get_my_profile() RPC TO ALSO INCLUDE ACTIVATION FIELDS
+DROP FUNCTION IF EXISTS public.get_my_profile();
 CREATE OR REPLACE FUNCTION public.get_my_profile()
 RETURNS TABLE (
   id UUID,

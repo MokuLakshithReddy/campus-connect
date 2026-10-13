@@ -1842,6 +1842,7 @@ GRANT SELECT (
 ) ON public.profiles TO authenticated;
 
 -- Dedicated secure RPC for authenticated users to view their own full profile including student_id
+DROP FUNCTION IF EXISTS public.get_my_profile();
 CREATE OR REPLACE FUNCTION public.get_my_profile()
 RETURNS TABLE (
   id UUID,
@@ -1855,6 +1856,8 @@ RETURNS TABLE (
   branch_id UUID,
   bio TEXT,
   avatar_url TEXT,
+  activation_expires_at TIMESTAMPTZ,
+  activated_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ
 )
@@ -1875,6 +1878,8 @@ AS $$
     p.branch_id,
     p.bio,
     p.avatar_url,
+    p.activation_expires_at,
+    p.activated_at,
     p.created_at,
     p.updated_at
   FROM public.profiles p
