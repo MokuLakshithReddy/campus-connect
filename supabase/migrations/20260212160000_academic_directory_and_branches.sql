@@ -764,6 +764,8 @@ CREATE POLICY "Admins can manage student directory"
 -- A. POSTS AUDIENCE POLICY
 DROP POLICY IF EXISTS "Anyone can view posts" ON public.posts;
 DROP POLICY IF EXISTS "Authenticated users view posts" ON public.posts;
+DROP POLICY IF EXISTS "Posts are viewable by everyone" ON public.posts;
+DROP POLICY IF EXISTS "Posts are viewable by authenticated users" ON public.posts;
 DROP POLICY IF EXISTS "Audience can view posts" ON public.posts;
 CREATE POLICY "Audience can view posts" ON public.posts
   FOR SELECT TO authenticated
