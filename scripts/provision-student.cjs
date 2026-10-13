@@ -184,8 +184,44 @@ async function provisionStudent() {
   console.log(`  - Admission Year: ${dirEntry.admission_year}`);
   console.log(`  - Roster integrity validated against roll number prefix '${branchResolution.prefix}'`);
 
-  // Step 3: Account provisioning in auth.users
-  console.log(`[Provisioning] Creating account in auth.users...`);
+  // Step 3: Check existing directory ownership BEFORE creating an auth account
+  let expectedUserId = dirEntry.profile_id || null;
+  if (dirEntry.profile_id) {
+    console.log(`[Ownership Check] Directory record is already linked to profile ${dirEntry.profile_id}. Verifying account ownership...`);
+    const linkedProfileOptions = {
+      hostname: SUPABASE_PROJECT_URL,
+      path: `/rest/v1/profiles?id=eq.${encodeURIComponent(dirEntry.profile_id)}&select=id,username,student_id,college_role,is_verified,must_change_password`,
+      method: 'GET',
+      headers: {
+        'apikey': SERVICE_ROLE_KEY,
+        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+      }
+    };
+
+    const linkedProfRes = await sendRequest(linkedProfileOptions);
+    if (linkedProfRes.statusCode < 200 || linkedProfRes.statusCode >= 300 || !Array.isArray(linkedProfRes.body) || linkedProfRes.body.length === 0) {
+      console.error(`ERROR: Directory record points to non-existent or inaccessible profile ${dirEntry.profile_id}.`);
+      console.error(`Provisioning aborted to prevent orphaned or misattributed accounts.`);
+      process.exit(1);
+    }
+
+    const linkedProf = linkedProfRes.body[0];
+    const matchesRoll = (linkedProf.student_id && linkedProf.student_id.toUpperCase() === rollNumber.toUpperCase()) ||
+                        (linkedProf.username && linkedProf.username.toUpperCase() === rollNumber.toUpperCase());
+
+    if (!matchesRoll) {
+      console.error(`ERROR: Directory conflict! Directory record for ${rollNumber} is already linked to a different account:`);
+      console.error(`  - Linked Profile ID: ${linkedProf.id}`);
+      console.error(`  - Linked Username:   ${linkedProf.username}`);
+      console.error(`  - Linked Student ID: ${linkedProf.student_id}`);
+      console.error(`Provisioning aborted before creating or modifying any authentication account.`);
+      process.exit(1);
+    }
+    console.log(`- Verified: Existing linked profile ${linkedProf.id} matches roll number ${rollNumber}.`);
+  }
+
+  // Step 4: Account provisioning in auth.users
+  console.log(`[Provisioning] Ensuring account in auth.users...`);
   console.log(`- Identifier: ${rollNumber}`);
   console.log(`- Email mapping: ${email}`);
   console.log(`- Onboarding security: must_change_password enforced`);
@@ -215,11 +251,13 @@ async function provisionStudent() {
     }
   };
 
-  let userId = null;
+  let userId = expectedUserId;
+  let isNewlyCreatedUser = false;
   const createRes = await sendRequest(createOptions, payload);
 
   if (createRes.statusCode >= 200 && createRes.statusCode < 300) {
     userId = createRes.body?.id;
+    isNewlyCreatedUser = true;
     console.log(`- Account created in auth.users (User ID: ${userId})`);
   } else if (createRes.statusCode === 422 && String(createRes.rawBody).includes('already')) {
     console.log(`- Account already exists in auth.users. Validating idempotent profile state...`);
@@ -228,7 +266,7 @@ async function provisionStudent() {
     process.exit(1);
   }
 
-  // Step 4: Verify profile state idempotently
+  // Step 5: Full Invariant Validation on Profile State
   const profileOptions = {
     hostname: SUPABASE_PROJECT_URL,
     path: `/rest/v1/profiles?student_id=eq.${encodeURIComponent(rollNumber)}&select=id,username,student_id,college_role,is_verified,must_change_password`,
@@ -240,30 +278,85 @@ async function provisionStudent() {
   };
 
   const profRes = await sendRequest(profileOptions);
-  if (profRes.statusCode < 200 || profRes.statusCode >= 300) {
-    console.error(`ERROR: Failed to query public.profiles (HTTP ${profRes.statusCode}): ${profRes.rawBody}`);
-    process.exit(1);
-  }
-
-  if (!Array.isArray(profRes.body) || profRes.body.length === 0) {
+  if (profRes.statusCode < 200 || profRes.statusCode >= 300 || !Array.isArray(profRes.body) || profRes.body.length === 0) {
     console.error(`ERROR: Could not verify profile record for student ${rollNumber}.`);
+    if (isNewlyCreatedUser && userId) {
+      await rollbackAuthUser(userId);
+    }
     process.exit(1);
   }
 
   const prof = profRes.body[0];
-  if (dirEntry.profile_id && dirEntry.profile_id !== prof.id) {
-    console.error(`ERROR: Integrity conflict! Directory record is already linked to a different profile ID (${dirEntry.profile_id}) instead of (${prof.id}).`);
+
+  // Invariant 1: Profile ID must match newly created user or existing directory link
+  if (userId && prof.id !== userId) {
+    console.error(`ERROR: Invariant violation! Profile ID ${prof.id} does not match auth User ID ${userId}.`);
+    if (isNewlyCreatedUser) await rollbackAuthUser(userId);
     process.exit(1);
   }
 
-  console.log(`[Verification] Successfully verified public.profiles record:`);
-  console.log(`  - Profile ID: ${prof.id}`);
-  console.log(`  - Username: ${prof.username}`);
-  console.log(`  - College Role: ${prof.college_role}`);
+  if (dirEntry.profile_id && dirEntry.profile_id !== prof.id) {
+    console.error(`ERROR: Invariant violation! Directory record linked to ${dirEntry.profile_id} but profile ID is ${prof.id}.`);
+    if (isNewlyCreatedUser) await rollbackAuthUser(userId);
+    process.exit(1);
+  }
+
+  // Invariant 2: Username must match roll number
+  if (prof.username.toUpperCase() !== rollNumber.toUpperCase()) {
+    console.error(`ERROR: Invariant violation! Profile username (${prof.username}) does not match roll number (${rollNumber}).`);
+    if (isNewlyCreatedUser) await rollbackAuthUser(userId);
+    process.exit(1);
+  }
+
+  // Invariant 3: Student ID must match roll number
+  if (!prof.student_id || prof.student_id.toUpperCase() !== rollNumber.toUpperCase()) {
+    console.error(`ERROR: Invariant violation! Profile student_id (${prof.student_id}) does not match roll number (${rollNumber}).`);
+    if (isNewlyCreatedUser) await rollbackAuthUser(userId);
+    process.exit(1);
+  }
+
+  // Invariant 4: College role must be student
+  if (prof.college_role !== 'student') {
+    console.error(`ERROR: Invariant violation! Expected college_role 'student', got '${prof.college_role}'.`);
+    if (isNewlyCreatedUser) await rollbackAuthUser(userId);
+    process.exit(1);
+  }
+
+  // Invariant 5: must_change_password must be true for un-onboarded provisioned account
+  if (prof.must_change_password !== true) {
+    console.error(`ERROR: Invariant violation! must_change_password must be true for initial onboarding.`);
+    if (isNewlyCreatedUser) await rollbackAuthUser(userId);
+    process.exit(1);
+  }
+
+  console.log(`[Verification] Successfully validated all profile invariants:`);
+  console.log(`  - Profile ID:           ${prof.id}`);
+  console.log(`  - Username:             ${prof.username}`);
+  console.log(`  - Student ID:           ${prof.student_id}`);
+  console.log(`  - College Role:         ${prof.college_role}`);
   console.log(`  - Must Change Password: ${prof.must_change_password}`);
 
   // Final confirmation ONLY when all validation steps have passed
   console.log(`\nSUCCESS: Student ${rollNumber} is verified, provisioned, and ready for first-time password reset onboarding.`);
+}
+
+async function rollbackAuthUser(userId) {
+  try {
+    console.warn(`[Rollback] Recovering from partial failure: deleting newly created auth user ${userId}...`);
+    const delOptions = {
+      hostname: SUPABASE_PROJECT_URL,
+      path: `/auth/v1/admin/users/${userId}`,
+      method: 'DELETE',
+      headers: {
+        'apikey': SERVICE_ROLE_KEY,
+        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+      }
+    };
+    await sendRequest(delOptions);
+    console.warn(`[Rollback] Auth user ${userId} cleanly removed.`);
+  } catch (err) {
+    console.error(`[Rollback Error] Could not remove auth user ${userId}:`, err.message);
+  }
 }
 
 provisionStudent().catch((err) => {

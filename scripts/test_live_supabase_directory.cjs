@@ -18,12 +18,25 @@ const https = require('https');
 const crypto = require('crypto');
 
 const MANAGEMENT_TOKEN = process.env.TEST_SUPABASE_MANAGEMENT_TOKEN || process.env.SUPABASE_ACCESS_TOKEN;
-const PROJECT_REF = process.env.TEST_SUPABASE_PROJECT_REF || 'gtkvujspajcelzufpggr';
+const PROJECT_REF = process.env.TEST_SUPABASE_PROJECT_REF;
+const KNOWN_PRODUCTION_PROJECT_REF = 'gtkvujspajcelzufpggr';
 
 if (!MANAGEMENT_TOKEN) {
-  console.log('NOTICE: TEST_SUPABASE_MANAGEMENT_TOKEN / SUPABASE_ACCESS_TOKEN is required to run live Supabase tests.');
-  console.log('Skipping live Supabase directory test runner.');
-  process.exit(0);
+  console.error('ERROR: TEST_SUPABASE_MANAGEMENT_TOKEN or SUPABASE_ACCESS_TOKEN is required to run live database tests.');
+  process.exit(1);
+}
+
+if (!PROJECT_REF) {
+  console.error('ERROR: TEST_SUPABASE_PROJECT_REF environment variable is required.');
+  console.error('Defaulting to production or hardcoded projects has been disabled for safety.');
+  process.exit(1);
+}
+
+if (PROJECT_REF === KNOWN_PRODUCTION_PROJECT_REF && process.env.ALLOW_PRODUCTION_TEST_RUN !== 'true') {
+  console.error(`SAFETY GUARD ACTIVE: Target project reference matches production (${PROJECT_REF}).`);
+  console.error('Refusing to execute mutating live test suites against production.');
+  console.error('To override this safety barrier deliberately, set ALLOW_PRODUCTION_TEST_RUN=true.');
+  process.exit(1);
 }
 
 function querySql(query) {
@@ -67,6 +80,13 @@ async function runTestSuite() {
   const testRoll = `25MVCSMR9${testRunId.slice(0, 3)}`; // Exactly 12 chars: 25MVCSMR + 4 chars
   const user1Id = crypto.randomUUID();
   const user2Id = crypto.randomUUID();
+  const pendingUserId = crypto.randomUUID();
+  const rejectedUserId = crypto.randomUUID();
+  const msgClubId = crypto.randomUUID();
+  const genChannelId = crypto.randomUUID();
+  const annChannelId = crypto.randomUUID();
+  const genMsgId = crypto.randomUUID();
+  const annMsgId = crypto.randomUUID();
 
   console.log('================================================================================');
   console.log(`RUNNING LIVE DATABASE INTEGRATION TESTS (Run ID: ${testRunId})`);
@@ -670,13 +690,6 @@ async function runTestSuite() {
     // 17. Channel Messages Audience and Membership Isolation
     total++;
     process.stdout.write('[Test 17] Testing channel message isolation (active members vs pending/rejected/non-members)... ');
-    const msgClubId = crypto.randomUUID();
-    const genChannelId = crypto.randomUUID();
-    const annChannelId = crypto.randomUUID();
-    const pendingUserId = crypto.randomUUID();
-    const rejectedUserId = crypto.randomUUID();
-    const genMsgId = crypto.randomUUID();
-    const annMsgId = crypto.randomUUID();
 
     // Setup club, channels, and users
     await querySql(`
@@ -756,15 +769,6 @@ async function runTestSuite() {
                                    nonMemberGenMsgs.length === 0 &&
                                    user2AnnMsgs.length === 1;
 
-    // Cleanup channel test fixtures
-    await querySql(`
-      DELETE FROM public.channel_messages WHERE id IN ('${genMsgId}', '${annMsgId}');
-      DELETE FROM public.club_channels WHERE id IN ('${genChannelId}', '${annChannelId}');
-      DELETE FROM public.club_memberships WHERE club_id = '${msgClubId}';
-      DELETE FROM public.clubs WHERE id = '${msgClubId}';
-      DELETE FROM auth.users WHERE id IN ('${pendingUserId}', '${rejectedUserId}');
-    `);
-
     if (channelIsolationPassed) {
       console.log('PASSED (Active members see discussions; pending/rejected/non-members blocked; public announcements accessible)');
       passed++;
@@ -779,10 +783,14 @@ async function runTestSuite() {
   } finally {
     try {
       await querySql(`
+        DELETE FROM public.channel_messages WHERE id IN ('${genMsgId}', '${annMsgId}');
+        DELETE FROM public.club_channels WHERE id IN ('${genChannelId}', '${annChannelId}');
+        DELETE FROM public.club_memberships WHERE club_id = '${msgClubId}';
+        DELETE FROM public.clubs WHERE id = '${msgClubId}';
         DELETE FROM public.student_directory WHERE roll_number = '${testRoll}';
-        DELETE FROM auth.users WHERE id IN ('${user1Id}', '${user2Id}');
+        DELETE FROM auth.users WHERE id IN ('${user1Id}', '${user2Id}', '${pendingUserId}', '${rejectedUserId}');
       `);
-      console.log('Test fixtures cleaned up successfully.');
+      console.log('Comprehensive test fixtures cleaned up successfully.');
     } catch (cleanupErr) {
       console.warn('Warning during cleanup:', cleanupErr.message);
     }

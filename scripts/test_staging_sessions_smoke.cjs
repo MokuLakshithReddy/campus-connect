@@ -14,11 +14,26 @@ const https = require('https');
 const crypto = require('crypto');
 
 const MANAGEMENT_TOKEN = process.env.TEST_SUPABASE_MANAGEMENT_TOKEN || process.env.SUPABASE_ACCESS_TOKEN;
+const PROJECT_REF = process.env.TEST_SUPABASE_PROJECT_REF;
+const KNOWN_PRODUCTION_PROJECT_REF = 'gtkvujspajcelzufpggr';
+
 if (!MANAGEMENT_TOKEN) {
   console.error('ERROR: SUPABASE_ACCESS_TOKEN or TEST_SUPABASE_MANAGEMENT_TOKEN environment variable is required.');
   process.exit(1);
 }
-const PROJECT_REF = process.env.TEST_SUPABASE_PROJECT_REF || 'gtkvujspajcelzufpggr';
+
+if (!PROJECT_REF) {
+  console.error('ERROR: TEST_SUPABASE_PROJECT_REF environment variable is required.');
+  console.error('Defaulting to production or hardcoded projects has been disabled for safety.');
+  process.exit(1);
+}
+
+if (PROJECT_REF === KNOWN_PRODUCTION_PROJECT_REF && process.env.ALLOW_PRODUCTION_TEST_RUN !== 'true') {
+  console.error(`SAFETY GUARD ACTIVE: Target project reference matches production (${PROJECT_REF}).`);
+  console.error('Refusing to execute mutating live test suites against production.');
+  console.error('To override this safety barrier deliberately, set ALLOW_PRODUCTION_TEST_RUN=true.');
+  process.exit(1);
+}
 
 function querySql(query) {
   return new Promise((resolve, reject) => {
@@ -62,8 +77,18 @@ async function runStagingSmokeTest() {
   const verifiedStudentId = crypto.randomUUID();
   const organizerId = crypto.randomUUID();
   const outsiderOrganizerId = crypto.randomUUID();
-  const adminId = '73195cf7-df24-49e8-9f09-07bf6eb81c11'; // Existing College Admin
   const targetStudentId = crypto.randomUUID();
+
+  // Dynamically resolve college administrator fixture from test environment
+  let adminId = process.env.TEST_ADMIN_USER_ID;
+  if (!adminId) {
+    const adminLookup = await querySql("SELECT id FROM public.profiles WHERE college_role = 'college_admin' LIMIT 1;");
+    if (adminLookup && adminLookup.length > 0 && adminLookup[0]?.id) {
+      adminId = adminLookup[0].id;
+    } else {
+      throw new Error("No college_admin user found in target database and TEST_ADMIN_USER_ID was not set.");
+    }
+  }
 
   const club1Id = crypto.randomUUID();
   const club2Id = crypto.randomUUID();

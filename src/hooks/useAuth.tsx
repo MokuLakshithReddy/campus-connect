@@ -8,16 +8,14 @@ interface SignUpMetadata {
   student_id?: string;
 }
 
-interface UserProfile {
-  student_id: string | null;
-  username: string;
-  college_role: "student" | "faculty" | "college_admin";
-  is_verified: boolean;
-  must_change_password: boolean;
-  department?: string | null;
-  year?: string | null;
-  branch_id?: string | null;
-}
+import {
+  UserProfile,
+  ProfileResolutionResult,
+  validateAndNormalizeUserProfile,
+  resolveProfileFromSources,
+} from "@/lib/profileSecurity";
+
+export type { UserProfile, ProfileResolutionResult };
 
 interface AuthContextType {
   user: User | null;
@@ -43,58 +41,44 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
 
-  const fetchProfile = async (userId: string) => {
+  const fetchProfile = async (userId: string): Promise<UserProfile | null> => {
     try {
       // Primary secure path: fetch caller's own full profile via dedicated RPC
       const { data: rpcData, error: rpcError } = await (supabase.rpc as any)("get_my_profile");
 
-      let data: any = Array.isArray(rpcData) ? rpcData[0] : rpcData;
-      let error = rpcError;
+      let fallbackData: any = null;
+      let fallbackError: any = null;
 
-      // Fallback: If RPC is unavailable or returns null, query safe public columns
-      if (!data) {
+      const primaryRow = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+
+      // Fallback: If primary RPC failed or returned no data, query profiles table
+      // CRITICAL SECURITY: Must explicitly select must_change_password and student_id
+      if (!primaryRow || rpcError) {
+        if (rpcError) {
+          console.warn("Primary get_my_profile() RPC returned error, querying fallback profiles table:", rpcError);
+        }
         const fallbackRes = await supabase
           .from("profiles")
-          .select("id, username, college_role, is_verified, department, year, branch_id")
+          .select("id, username, college_role, is_verified, department, year, branch_id, must_change_password, student_id")
           .eq("id", userId)
           .maybeSingle();
 
-        if (fallbackRes.data) {
-          data = fallbackRes.data;
-          error = null;
-        } else if (fallbackRes.error && !error) {
-          error = fallbackRes.error;
-        }
+        fallbackData = fallbackRes.data;
+        fallbackError = fallbackRes.error;
       }
 
-      if (error) {
-        console.error("Database error fetching user profile:", error);
-        setProfileError(`Unable to load profile (${error.message}). Please check network/connection.`);
-        return null;
-      }
+      const resolution = resolveProfileFromSources(primaryRow, rpcError, fallbackData, fallbackError);
 
-      if (!data) {
-        setProfileError("Account profile record not found. Please contact campus administration.");
-        return null;
-      }
+      setProfile(resolution.profile);
+      setProfileError(resolution.error);
+      setMustChangePassword(resolution.mustChangePassword);
 
-      const prof: UserProfile = {
-        student_id: data.student_id,
-        username: data.username,
-        college_role: data.college_role,
-        is_verified: data.is_verified,
-        must_change_password: Boolean(data.must_change_password),
-        department: (data as any).department ?? null,
-        year: (data as any).year ?? null,
-        branch_id: (data as any).branch_id ?? null,
-      };
-      setProfile(prof);
-      setProfileError(null);
-      setMustChangePassword(Boolean(data.must_change_password));
-      return prof;
+      return resolution.profile;
     } catch (err: any) {
       console.error("Network or unexpected error fetching user profile:", err);
+      setProfile(null);
       setProfileError(err?.message || "Failed to load account profile due to a network error.");
+      setMustChangePassword(true); // Fail closed
       return null;
     }
   };

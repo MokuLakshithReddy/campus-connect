@@ -8,6 +8,10 @@ import {
   CampusNotification,
 } from "../types/campus";
 import { sanitizeSearchQuery } from "../lib/utils";
+import {
+  validateAndNormalizeUserProfile,
+  resolveProfileFromSources,
+} from "../lib/profileSecurity";
 
 describe("CampusConnect Security & Identity Verification", () => {
   it("should enforce that student accounts cannot self-grant college_admin or verified status", () => {
@@ -787,6 +791,123 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
       registration_count: statsLoadedSuccess ? (registrationCounts.get(ev.id) || 0) : null,
     }));
     expect(enrichedOnSuccess[0].registration_count).toBe(0);
+  });
+});
+
+describe("Mandatory Password Change & Security Field Profile Resolution", () => {
+  it("should fail closed and enforce mustChangePassword=true when RPC fails and fallback is missing must_change_password", () => {
+    // Regression scenario: RPC fails; fallback query returns only public fields without must_change_password
+    const rpcData = null;
+    const rpcError = new Error("Function get_my_profile not found or RPC timeout");
+    const incompleteFallbackData = {
+      id: "std-100",
+      username: "24cs0199",
+      college_role: "student",
+      is_verified: false,
+      department: "CSE",
+      year: "1st Year",
+      branch_id: "b-01",
+      // must_change_password is MISSING
+    };
+
+    const result = resolveProfileFromSources(rpcData, rpcError, incompleteFallbackData, null);
+
+    // Incomplete profile must be rejected and mustChangePassword must default to true (fail-closed)
+    expect(result.profile).toBeNull();
+    expect(result.mustChangePassword).toBe(true);
+    expect(result.error).toContain("missing security-critical fields");
+  });
+
+  it("should respect must_change_password=true when RPC fails but fallback provides must_change_password", () => {
+    const rpcData = null;
+    const rpcError = new Error("RPC timeout");
+    const validFallbackData = {
+      id: "std-101",
+      username: "24cs0142",
+      student_id: "24CS0142",
+      college_role: "student",
+      is_verified: true,
+      must_change_password: true,
+      department: "Computer Science",
+      year: "1st Year",
+      branch_id: "b-01",
+    };
+
+    const result = resolveProfileFromSources(rpcData, rpcError, validFallbackData, null);
+
+    expect(result.profile).not.toBeNull();
+    expect(result.profile?.username).toBe("24cs0142");
+    expect(result.profile?.must_change_password).toBe(true);
+    expect(result.mustChangePassword).toBe(true);
+    expect(result.error).toBeNull();
+  });
+
+  it("should allow must_change_password=false ONLY when explicitly provided as boolean false", () => {
+    const rpcData = null;
+    const rpcError = new Error("RPC error");
+    const onboardedFallbackData = {
+      id: "std-102",
+      username: "24cs0143",
+      student_id: "24CS0143",
+      college_role: "student",
+      is_verified: true,
+      must_change_password: false,
+      department: "Computer Science",
+      year: "2nd Year",
+      branch_id: "b-01",
+    };
+
+    const result = resolveProfileFromSources(rpcData, rpcError, onboardedFallbackData, null);
+
+    expect(result.profile).not.toBeNull();
+    expect(result.profile?.must_change_password).toBe(false);
+    expect(result.mustChangePassword).toBe(false);
+    expect(result.error).toBeNull();
+  });
+
+  it("should reject profile and fail closed when role or username is invalid", () => {
+    const invalidProfile1 = {
+      id: "std-103",
+      username: "   ", // whitespace only
+      college_role: "student",
+      is_verified: false,
+      must_change_password: true,
+    };
+    expect(validateAndNormalizeUserProfile(invalidProfile1)).toBeNull();
+
+    const invalidProfile2 = {
+      id: "std-104",
+      username: "attacker",
+      college_role: "superuser", // unrecognized role
+      is_verified: true,
+      must_change_password: false,
+    };
+    expect(validateAndNormalizeUserProfile(invalidProfile2)).toBeNull();
+
+    const result = resolveProfileFromSources(null, null, invalidProfile2, null);
+    expect(result.profile).toBeNull();
+    expect(result.mustChangePassword).toBe(true);
+  });
+
+  it("should successfully resolve profile when primary RPC succeeds with all security fields", () => {
+    const rpcData = {
+      id: "std-105",
+      username: "24cs0144",
+      student_id: "24CS0144",
+      college_role: "student",
+      is_verified: true,
+      must_change_password: true,
+      department: "CSE",
+      year: "1st Year",
+      branch_id: "b-02",
+    };
+
+    const result = resolveProfileFromSources(rpcData, null, null, null);
+
+    expect(result.profile).not.toBeNull();
+    expect(result.profile?.username).toBe("24cs0144");
+    expect(result.mustChangePassword).toBe(true);
+    expect(result.error).toBeNull();
   });
 });
 
