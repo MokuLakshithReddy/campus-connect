@@ -551,6 +551,11 @@ describe("College Roll Number Login & Mandatory Password Change", () => {
     // Tests SQL ILIKE wildcard character escaping for literal matching
     expect(sanitizeSearchQuery("100% attendance")).toBe("100\\% attendance");
     expect(sanitizeSearchQuery("john_doe")).toBe("john\\_doe");
+    // Tests backslash escaping to prevent LIKE trailing-escape-character syntax errors
+    expect(sanitizeSearchQuery("folder\\path\\file")).toBe("folder\\\\path\\\\file");
+    expect(sanitizeSearchQuery("test\\")).toBe("test\\\\");
+    expect(sanitizeSearchQuery("100\\% complete")).toBe("100\\\\\\% complete");
+    expect(sanitizeSearchQuery("test_(with,parens\\and%wildcards*)")).toBe("test\\_ with parens\\\\and\\%wildcards");
     // Tests roll numbers and department with hyphens and dots
     expect(sanitizeSearchQuery("24CS-0142")).toBe("24CS-0142");
     expect(sanitizeSearchQuery("B.Tech CSE")).toBe("B.Tech CSE");

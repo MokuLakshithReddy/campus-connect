@@ -64,10 +64,14 @@ function sendRequest(options, data) {
   });
 }
 
+/**
+ * Distinguishes an HTTP/API transport error from a genuine missing record in student_directory.
+ * Throws on API/HTTP failure; returns null ONLY when query succeeds with 0 matching rows.
+ */
 async function verifyDirectoryRecord(roll) {
   const options = {
     hostname: SUPABASE_PROJECT_URL,
-    path: `/rest/v1/student_directory?roll_number=eq.${encodeURIComponent(roll)}&select=roll_number,branch_id,admission_year,is_active`,
+    path: `/rest/v1/student_directory?roll_number=eq.${encodeURIComponent(roll)}&select=roll_number,branch_id,admission_year,is_active,profile_id`,
     method: 'GET',
     headers: {
       'apikey': SERVICE_ROLE_KEY,
@@ -76,41 +80,115 @@ async function verifyDirectoryRecord(roll) {
   };
 
   const res = await sendRequest(options);
-  if (res.statusCode >= 200 && res.statusCode < 300 && Array.isArray(res.body)) {
-    return res.body[0] || null;
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    const errorDetails = typeof res.body === 'object' && res.body?.message 
+      ? res.body.message 
+      : res.rawBody || `HTTP ${res.statusCode}`;
+    throw new Error(`Student directory API query failed (HTTP ${res.statusCode}): ${errorDetails}`);
   }
-  return null;
+  if (!Array.isArray(res.body)) {
+    throw new Error(`Unexpected Directory API response payload format: ${res.rawBody}`);
+  }
+  return res.body[0] || null;
+}
+
+/**
+ * Resolves the roll number's official academic branch via database RPC resolve_student_branch.
+ * Validates that the roll number has a recognized active academic branch prefix.
+ */
+async function resolveBranchForRoll(roll) {
+  const options = {
+    hostname: SUPABASE_PROJECT_URL,
+    path: '/rest/v1/rpc/resolve_student_branch',
+    method: 'POST',
+    headers: {
+      'apikey': SERVICE_ROLE_KEY,
+      'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json'
+    }
+  };
+
+  const res = await sendRequest(options, { p_roll_number: roll });
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    const errorDetails = typeof res.body === 'object' && res.body?.message 
+      ? res.body.message 
+      : res.rawBody || `HTTP ${res.statusCode}`;
+    throw new Error(`Branch resolution RPC failed (HTTP ${res.statusCode}): ${errorDetails}`);
+  }
+  return res.body;
 }
 
 async function provisionStudent() {
   console.log(`[Provisioning] Validating student roll number ${rollNumber}...`);
 
-  // 1. Verify existence in student directory - mandatory prerequisite for provisioning
+  // Step 1: Verify existence in student directory — fail closed if missing, inactive, or API error
   let dirEntry = null;
   try {
     dirEntry = await verifyDirectoryRecord(rollNumber);
   } catch (err) {
-    console.error(`ERROR: Failed to query student directory: ${err.message}`);
+    console.error(`ERROR: Directory API communication failure: ${err.message}`);
+    console.error(`Provisioning aborted. Cannot proceed without verified roster connection.`);
     process.exit(1);
   }
 
   if (!dirEntry) {
-    console.error(`ERROR: Cannot provision student ${rollNumber}. No active record found in the official student roster (public.student_directory).`);
-    console.error(`Before creating an account, the student must be enrolled in student_directory by campus administration.`);
+    console.error(`ERROR: Cannot provision student ${rollNumber}. No record found in the official student roster (public.student_directory).`);
+    console.error(`Before creating an authentication account, the student must be officially enrolled in student_directory by campus administration.`);
     process.exit(1);
   }
 
-  if (dirEntry.is_active === false) {
+  if (dirEntry.is_active !== true) {
     console.error(`ERROR: Cannot provision student ${rollNumber}. The student directory record is marked inactive.`);
+    console.error(`Provisioning aborted for inactive student record.`);
     process.exit(1);
   }
 
-  console.log(`- Verified against official student directory: active record found (Branch ID: ${dirEntry.branch_id}, Year: ${dirEntry.admission_year})`);
+  // Step 2: Verify that the record's branch and admission year agree with the submitted roll number
+  let branchResolution = null;
+  try {
+    branchResolution = await resolveBranchForRoll(rollNumber);
+  } catch (err) {
+    console.error(`ERROR: Failed to resolve academic branch for roll number ${rollNumber}: ${err.message}`);
+    process.exit(1);
+  }
 
+  if (!branchResolution || branchResolution.success !== true) {
+    console.error(`ERROR: Roll number ${rollNumber} could not be resolved against configured academic prefixes: ${branchResolution?.error || 'Unknown error'}`);
+    process.exit(1);
+  }
+
+  if (branchResolution.branch_id !== dirEntry.branch_id) {
+    console.error(`ERROR: Integrity mismatch for ${rollNumber}:`);
+    console.error(`  - Roster branch_id:    ${dirEntry.branch_id}`);
+    console.error(`  - Resolved branch_id:  ${branchResolution.branch_id} (${branchResolution.display_name})`);
+    console.error(`Provisioning aborted: directory record branch does not match roll number academic prefix.`);
+    process.exit(1);
+  }
+
+  if (branchResolution.admission_year !== dirEntry.admission_year) {
+    console.error(`ERROR: Admission year mismatch for ${rollNumber}:`);
+    console.error(`  - Roster admission_year:   ${dirEntry.admission_year}`);
+    console.error(`  - Resolved admission_year: ${branchResolution.admission_year}`);
+    console.error(`Provisioning aborted: directory admission year does not match roll number admission year.`);
+    process.exit(1);
+  }
+
+  const expectedYearDigits = String(dirEntry.admission_year).slice(-2);
+  if (rollNumber.slice(0, 2) !== expectedYearDigits) {
+    console.error(`ERROR: Roll number prefix mismatch: ${rollNumber} does not begin with admission year suffix '${expectedYearDigits}'.`);
+    process.exit(1);
+  }
+
+  console.log(`- Verified against official student directory: active record found`);
+  console.log(`  - Branch: ${branchResolution.display_name} (${branchResolution.branch_code})`);
+  console.log(`  - Admission Year: ${dirEntry.admission_year}`);
+  console.log(`  - Roster integrity validated against roll number prefix '${branchResolution.prefix}'`);
+
+  // Step 3: Account provisioning in auth.users
   console.log(`[Provisioning] Creating account in auth.users...`);
   console.log(`- Identifier: ${rollNumber}`);
   console.log(`- Email mapping: ${email}`);
-  console.log(`- Onboarding security: must_change_password enforced (initial credential requires replacement)`);
+  console.log(`- Onboarding security: must_change_password enforced`);
 
   const payload = {
     email,
@@ -120,7 +198,7 @@ async function provisionStudent() {
       username: rollNumber,
       student_id: rollNumber,
       full_name: fullName,
-      department,
+      department: branchResolution.display_name || department,
       year,
       must_change_password: true
     }
@@ -146,11 +224,11 @@ async function provisionStudent() {
   } else if (createRes.statusCode === 422 && String(createRes.rawBody).includes('already')) {
     console.log(`- Account already exists in auth.users. Validating idempotent profile state...`);
   } else {
-    console.error(`ERROR: Failed to create user (HTTP ${createRes.statusCode}):`, createRes.rawBody);
+    console.error(`ERROR: Failed to create user in auth.users (HTTP ${createRes.statusCode}):`, createRes.rawBody);
     process.exit(1);
   }
 
-  // 2. Verify profile state idempotently
+  // Step 4: Verify profile state idempotently
   const profileOptions = {
     hostname: SUPABASE_PROJECT_URL,
     path: `/rest/v1/profiles?student_id=eq.${encodeURIComponent(rollNumber)}&select=id,username,student_id,college_role,is_verified,must_change_password`,
@@ -162,18 +240,30 @@ async function provisionStudent() {
   };
 
   const profRes = await sendRequest(profileOptions);
-  if (profRes.statusCode >= 200 && profRes.statusCode < 300 && Array.isArray(profRes.body) && profRes.body.length > 0) {
-    const prof = profRes.body[0];
-    console.log(`[Verification] Successfully verified public.profiles record:`);
-    console.log(`  - Profile ID: ${prof.id}`);
-    console.log(`  - Username: ${prof.username}`);
-    console.log(`  - College Role: ${prof.college_role}`);
-    console.log(`  - Must Change Password: ${prof.must_change_password}`);
-    console.log(`\nSUCCESS: Student ${rollNumber} is provisioned and ready for first-time password reset onboarding.`);
-  } else {
+  if (profRes.statusCode < 200 || profRes.statusCode >= 300) {
+    console.error(`ERROR: Failed to query public.profiles (HTTP ${profRes.statusCode}): ${profRes.rawBody}`);
+    process.exit(1);
+  }
+
+  if (!Array.isArray(profRes.body) || profRes.body.length === 0) {
     console.error(`ERROR: Could not verify profile record for student ${rollNumber}.`);
     process.exit(1);
   }
+
+  const prof = profRes.body[0];
+  if (dirEntry.profile_id && dirEntry.profile_id !== prof.id) {
+    console.error(`ERROR: Integrity conflict! Directory record is already linked to a different profile ID (${dirEntry.profile_id}) instead of (${prof.id}).`);
+    process.exit(1);
+  }
+
+  console.log(`[Verification] Successfully verified public.profiles record:`);
+  console.log(`  - Profile ID: ${prof.id}`);
+  console.log(`  - Username: ${prof.username}`);
+  console.log(`  - College Role: ${prof.college_role}`);
+  console.log(`  - Must Change Password: ${prof.must_change_password}`);
+
+  // Final confirmation ONLY when all validation steps have passed
+  console.log(`\nSUCCESS: Student ${rollNumber} is verified, provisioned, and ready for first-time password reset onboarding.`);
 }
 
 provisionStudent().catch((err) => {
