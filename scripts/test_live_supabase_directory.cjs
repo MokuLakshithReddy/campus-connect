@@ -3,12 +3,15 @@
  * 
  * Verifies with REAL database transactions against Supabase:
  * 1. Clean resolution of official prefixes to academic branches
- * 2. Directory linking flow with row locking (SELECT ... FOR UPDATE)
+ * 2. Directory linking flow with row locking (SELECT ... FOR UPDATE) and identity verification
  * 3. Rejection of duplicate/conflict claiming by another account
  * 4. Immutability of verified roll number & academic branch for students
- * 5. Rejection of self-escalation to college_admin on INSERT and UPDATE
- * 6. Roll number masking in search_campus_students RPC
- * 7. Content audience isolation (branch vs college) enforced by database
+ * 5. Rejection of self-escalation to college_admin on UPDATE
+ * 6. Anti-spoofing: Rejection of mismatched branch on post INSERT
+ * 7. Anti-spoofing: Rejection of branch modification on post UPDATE
+ * 8. Threat model: Direct alteration of is_verified without sync RPC is blocked
+ * 9. Search scoping: unverified blocked, cross-branch scraping blocked, own branch masked
+ * 10. Content audience isolation (branch vs college) enforced by database RLS
  */
 
 const https = require('https');
@@ -101,7 +104,9 @@ async function runTestSuite() {
 
     // Setup test directory entry
     const aimlBranch = await querySql("SELECT id FROM public.academic_branches WHERE course='B.Tech' AND branch_code='CSE-AIML';");
+    const cseBranch = await querySql("SELECT id FROM public.academic_branches WHERE course='B.Tech' AND branch_code='CSE';");
     const aimlBranchId = aimlBranch[0].id;
+    const cseBranchId = cseBranch[0].id;
 
     await querySql(`
       INSERT INTO public.student_directory (roll_number, branch_id, admission_year, is_active)
@@ -121,17 +126,19 @@ async function runTestSuite() {
       UPDATE public.profiles SET student_id = '${testRoll}' WHERE id IN ('${user1Id}', '${user2Id}');
     `);
 
-    // 3. User 1 Directory Linking Flow with Real Session Simulation
+    // 3. User 1 Directory Linking Flow with Transactional Session
     total++;
     process.stdout.write('[Test 3] Testing directory account-linking flow (User 1 claiming record)... ');
     const linkRes = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
       SET LOCAL request.jwt.claim.sub = '${user1Id}';
       SET LOCAL request.jwt.claim.role = 'authenticated';
       SELECT public.sync_authenticated_student_directory() AS res;
+      COMMIT;
     `);
     const linkObj = linkRes[0]?.res;
     if (linkObj && linkObj.linked === true && linkObj.roll_number === testRoll) {
-      // Verify profile in DB
       const profCheck = await querySql(`SELECT is_verified, branch_id FROM public.profiles WHERE id = '${user1Id}';`);
       if (profCheck[0]?.is_verified === true && profCheck[0]?.branch_id === aimlBranchId) {
         console.log('PASSED (Row locked, claimed, is_verified=true)');
@@ -145,13 +152,16 @@ async function runTestSuite() {
 
     // 4. User 2 Conflict Rejection (Fail-closed on already claimed directory record)
     total++;
-    process.stdout.write('[Test 4] Testing conflict rejection (User 2 attempting duplicate claim)... ');
+    process.stdout.write('[Test 4] Testing conflict rejection (User 2 duplicate claim)... ');
     let conflictRejected = false;
     try {
       await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
         SET LOCAL request.jwt.claim.sub = '${user2Id}';
         SET LOCAL request.jwt.claim.role = 'authenticated';
         SELECT public.sync_authenticated_student_directory() AS res;
+        COMMIT;
       `);
     } catch (err) {
       if (err.message.includes('already linked') || err.message.includes('Directory record already linked')) {
@@ -167,18 +177,21 @@ async function runTestSuite() {
       throw new Error('User 2 was erroneously allowed to claim an already linked directory record!');
     }
 
-    // 5. Academic Field Immutability (Student cannot alter verified roll number or branch)
+    // 5. Academic Field Immutability (Student cannot alter verified roll number)
     total++;
     process.stdout.write('[Test 5] Testing academic field immutability for verified student... ');
     let tamperingBlocked = false;
     try {
       await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
         SET LOCAL request.jwt.claim.sub = '${user1Id}';
         SET LOCAL request.jwt.claim.role = 'authenticated';
         UPDATE public.profiles SET student_id = '25MVCSMR0099' WHERE id = '${user1Id}';
+        COMMIT;
       `);
     } catch (err) {
-      if (err.message.includes('Student roll number cannot be modified') || err.message.includes('Unauthorized')) {
+      if (err.message.includes('Student roll number cannot be modified') || err.message.includes('permission denied') || err.message.includes('Unauthorized')) {
         tamperingBlocked = true;
       }
     }
@@ -195,12 +208,15 @@ async function runTestSuite() {
     let escalationBlocked = false;
     try {
       await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
         SET LOCAL request.jwt.claim.sub = '${user1Id}';
         SET LOCAL request.jwt.claim.role = 'authenticated';
         UPDATE public.profiles SET college_role = 'college_admin' WHERE id = '${user1Id}';
+        COMMIT;
       `);
     } catch (err) {
-      if (err.message.includes('College role cannot be self-modified') || err.message.includes('Unauthorized')) {
+      if (err.message.includes('College role cannot be self-modified') || err.message.includes('permission denied') || err.message.includes('Unauthorized')) {
         escalationBlocked = true;
       }
     }
@@ -211,28 +227,156 @@ async function runTestSuite() {
       throw new Error('Student was able to self-escalate college_role to college_admin!');
     }
 
-    // 7. Student Discovery Privacy (Masked Roll Number in search RPC)
+    // 7. Anti-Spoofing on post INSERT (reject mismatched branch)
     total++;
-    process.stdout.write('[Test 7] Testing search_campus_students roll number masking... ');
-    const searchRes = await querySql(`
-      SET LOCAL request.jwt.claim.sub = '${user1Id}';
-      SET LOCAL request.jwt.claim.role = 'authenticated';
-      SELECT * FROM public.search_campus_students('test_user1_${testRunId}', NULL, 5);
-    `);
-    if (searchRes.length > 0 && searchRes[0].student_id.startsWith('****') && searchRes[0].student_id.endsWith(testRoll.slice(-4))) {
-      console.log(`PASSED (Roll number masked as: ${searchRes[0].student_id})`);
+    process.stdout.write('[Test 7] Testing anti-spoofing on post INSERT (reject mismatched branch)... ');
+    let spoofBlockedOnInsert = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user1Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        INSERT INTO public.posts (id, user_id, branch_id, content_visibility, image_url, caption)
+        VALUES ('${crypto.randomUUID()}', '${user1Id}', '${cseBranchId}', 'branch', 'https://example.com/spoof.jpg', 'Spoofed');
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('Supplied branch_id does not match') || err.message.includes('Unauthorized')) {
+        spoofBlockedOnInsert = true;
+      }
+    }
+    if (spoofBlockedOnInsert) {
+      console.log('PASSED (Mismatched branch_id rejected by anti-spoofing trigger)');
       passed++;
     } else {
-      throw new Error(`Roll number was not properly masked: ${JSON.stringify(searchRes)}`);
+      throw new Error('User was able to spoof branch_id on post INSERT!');
     }
 
-    // 8. Database-Level Audience RLS Policy Verification
+    // 8. Anti-Spoofing on post UPDATE (reject branch alteration)
     total++;
-    process.stdout.write('[Test 8] Testing database-level audience RLS policies (branch vs college)... ');
+    process.stdout.write('[Test 8] Testing anti-spoofing on post UPDATE (reject branch alteration)... ');
+    const postTestId = crypto.randomUUID();
+    await querySql(`
+      INSERT INTO public.posts (id, user_id, branch_id, content_visibility, image_url, caption)
+      VALUES ('${postTestId}', '${user1Id}', '${aimlBranchId}', 'branch', 'https://example.com/p.jpg', 'Valid post');
+    `);
+
+    let spoofBlockedOnUpdate = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user1Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        UPDATE public.posts SET branch_id = '${cseBranchId}' WHERE id = '${postTestId}';
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('cannot be modified by non-administrators') || err.message.includes('Unauthorized')) {
+        spoofBlockedOnUpdate = true;
+      }
+    }
+    if (spoofBlockedOnUpdate) {
+      console.log('PASSED (branch_id alteration on UPDATE rejected by trigger)');
+      passed++;
+    } else {
+      throw new Error('User was able to alter branch_id on existing post!');
+    }
+    await querySql(`DELETE FROM public.posts WHERE id = '${postTestId}';`);
+
+    // 9. Threat Model: Direct alteration of is_verified without sync RPC is blocked
+    total++;
+    process.stdout.write('[Test 9] Testing threat model: Direct profile verification bypass attempt... ');
+    let directVerifyBlocked = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user2Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        UPDATE public.profiles SET is_verified = true WHERE id = '${user2Id}';
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('permission denied') || err.message.includes('Verification status cannot be modified') || err.message.includes('Unauthorized')) {
+        directVerifyBlocked = true;
+      }
+    }
+    if (directVerifyBlocked) {
+      console.log('PASSED (Direct alteration of is_verified blocked by database permissions/call-stack trigger)');
+      passed++;
+    } else {
+      throw new Error('User was able to directly modify is_verified on profiles!');
+    }
+
+    // 10. Student Discovery Privacy & Scoping Rules
+    total++;
+    process.stdout.write('[Test 10] Testing search_campus_students privacy scoping and cross-branch rules... ');
+    
+    // Unverified user2 cannot search
+    let unverifiedSearchBlocked = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user2Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT * FROM public.search_campus_students('', NULL, 5);
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('Access restricted') || err.message.includes('Only verified')) {
+        unverifiedSearchBlocked = true;
+      }
+    }
+    if (!unverifiedSearchBlocked) {
+      throw new Error('Unverified user was allowed to search student directory!');
+    }
+
+    // Verified user1 searching another branch with short query (<3 chars) must be rejected
+    let shortCrossBranchBlocked = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user1Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT * FROM public.search_campus_students('a', '${cseBranchId}', 5);
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('Cross-branch search requires at least 3') || err.message.includes('Access restricted')) {
+        shortCrossBranchBlocked = true;
+      }
+    }
+    if (!shortCrossBranchBlocked) {
+      throw new Error('Cross-branch search with <3 characters was not rejected!');
+    }
+
+    // Verified user1 searching own branch succeeds and masks roll number
+    const searchRes = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user1Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT * FROM public.search_campus_students('', NULL, 5);
+      COMMIT;
+    `);
+    const foundUser1 = searchRes.find(r => r.id === user1Id);
+    if (foundUser1 && foundUser1.student_id.startsWith('****') && foundUser1.student_id.endsWith(testRoll.slice(-4))) {
+      console.log(`PASSED (Unverified blocked, cross-branch scraping blocked, own branch masked)`);
+      passed++;
+    } else {
+      throw new Error(`Roll number check failed: ${JSON.stringify(searchRes)}`);
+    }
+
+    // 11. Database-Level Audience RLS Policies
+    total++;
+    process.stdout.write('[Test 11] Testing database-level audience RLS policies (branch vs college)... ');
     const testPostCollegeId = crypto.randomUUID();
     const testPostBranchId = crypto.randomUUID();
 
-    // Insert 1 college-wide post and 1 branch-specific post for AIML
     await querySql(`
       INSERT INTO public.posts (id, user_id, branch_id, content_visibility, image_url, caption)
       VALUES 
@@ -242,20 +386,22 @@ async function runTestSuite() {
 
     // User 1 (in AIML) queries posts under RLS
     const user1Posts = await querySql(`
-      SET ROLE authenticated;
-      SET request.jwt.claim.sub = '${user1Id}';
-      SET request.jwt.claim.role = 'authenticated';
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user1Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
       SELECT id FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');
-      RESET ROLE;
+      COMMIT;
     `);
 
     // User 2 (not linked to AIML, branch_id is NULL) queries posts under RLS
     const user2Posts = await querySql(`
-      SET ROLE authenticated;
-      SET request.jwt.claim.sub = '${user2Id}';
-      SET request.jwt.claim.role = 'authenticated';
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user2Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
       SELECT id FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');
-      RESET ROLE;
+      COMMIT;
     `);
 
     const user1Ids = user1Posts.map(p => p.id);
@@ -277,7 +423,6 @@ async function runTestSuite() {
     console.log('================================================================================\n');
 
   } finally {
-    // Guaranteed cleanup of disposable test fixtures
     try {
       await querySql(`
         DELETE FROM public.student_directory WHERE roll_number = '${testRoll}';

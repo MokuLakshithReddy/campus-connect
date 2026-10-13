@@ -1521,6 +1521,7 @@ AS $$
 DECLARE
   v_caller_id UUID := auth.uid();
   v_is_admin BOOLEAN := false;
+  v_context TEXT;
 BEGIN
   IF v_caller_id IS NOT NULL THEN
     SELECT (college_role = 'college_admin') INTO v_is_admin
@@ -1547,7 +1548,10 @@ BEGIN
       END IF;
 
       IF OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
-        RAISE EXCEPTION 'Unauthorized: Academic branch cannot be modified by student';
+        GET DIAGNOSTICS v_context = PG_CONTEXT;
+        IF v_context NOT LIKE '%sync_authenticated_student_directory%' THEN
+          RAISE EXCEPTION 'Unauthorized: Academic branch cannot be modified by student';
+        END IF;
       END IF;
 
       IF NEW.college_role IS DISTINCT FROM OLD.college_role THEN
@@ -1555,7 +1559,9 @@ BEGIN
       END IF;
 
       IF NEW.is_verified IS DISTINCT FROM OLD.is_verified THEN
-        IF pg_catalog.current_setting('app.internal_directory_sync', true) IS DISTINCT FROM 'true' THEN
+        -- Inspect PostgreSQL call stack to guarantee update originated inside sync_authenticated_student_directory
+        GET DIAGNOSTICS v_context = PG_CONTEXT;
+        IF v_context NOT LIKE '%sync_authenticated_student_directory%' THEN
           RAISE EXCEPTION 'Unauthorized: Only college admins can modify verification status';
         END IF;
       END IF;
@@ -1575,6 +1581,10 @@ CREATE TRIGGER trg_protect_profile_academic_fields
   EXECUTE FUNCTION public.protect_profile_academic_fields();
 
 REVOKE ALL ON FUNCTION public.protect_profile_academic_fields() FROM PUBLIC;
+
+-- Defense-in-depth: Column-level permissions prevent authenticated users from directly updating sensitive academic fields
+REVOKE UPDATE ON public.profiles FROM authenticated;
+GRANT UPDATE (username, bio, avatar_url, updated_at) ON public.profiles TO authenticated;
 
 -- 7. SEED ACADEMIC BRANCHES & CONFIRMED PREFIXES
 DO $$
@@ -1750,11 +1760,15 @@ $$;
 REVOKE ALL ON FUNCTION public.sync_authenticated_student_directory() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.sync_authenticated_student_directory() TO authenticated;
 
--- 10. RPC: CONTROLLED STUDENT DISCOVERY SEARCH
+-- 10. RPC: CONTROLLED STUDENT DISCOVERY SEARCH (PRIVACY-PRESERVING & SCOPED)
+-- Enforces branch scoping, excludes unverified profiles, requires query length for cross-branch searches.
+DROP FUNCTION IF EXISTS public.search_campus_students(TEXT, UUID, INT);
+
 CREATE OR REPLACE FUNCTION public.search_campus_students(
   p_query TEXT DEFAULT '',
   p_branch_id UUID DEFAULT NULL,
-  p_limit INT DEFAULT 20
+  p_limit INT DEFAULT 20,
+  p_offset INT DEFAULT 0
 )
 RETURNS TABLE(
   id UUID,
@@ -1772,11 +1786,55 @@ STABLE
 SET search_path = ''
 AS $$
 DECLARE
+  v_caller_id UUID := auth.uid();
+  v_caller_role TEXT;
+  v_caller_verified BOOLEAN;
+  v_caller_branch_id UUID;
+  v_effective_branch_id UUID;
   v_sanitized TEXT := pg_catalog.btrim(COALESCE(p_query, ''));
+  v_effective_limit INT;
+  v_effective_offset INT;
 BEGIN
-  IF auth.uid() IS NULL THEN
+  IF v_caller_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
   END IF;
+
+  SELECT p.college_role, p.is_verified, p.branch_id
+  INTO v_caller_role, v_caller_verified, v_caller_branch_id
+  FROM public.profiles p
+  WHERE p.id = v_caller_id;
+
+  -- Only verified members or college administrators can discover campus students
+  IF COALESCE(v_caller_role, '') != 'college_admin' AND NOT COALESCE(v_caller_verified, false) THEN
+    RAISE EXCEPTION 'Access restricted: Only verified students or college administrators can search student directory';
+  END IF;
+
+  -- Branch scoping rules:
+  IF COALESCE(v_caller_role, '') = 'college_admin' THEN
+    v_effective_branch_id := p_branch_id;
+  ELSE
+    -- For ordinary students:
+    IF p_branch_id IS NULL THEN
+      -- Default to caller's verified branch if query is short
+      IF pg_catalog.length(v_sanitized) < 3 THEN
+        v_effective_branch_id := v_caller_branch_id;
+      ELSE
+        -- If query >= 3 characters, allow targeted cross-college discovery
+        v_effective_branch_id := NULL;
+      END IF;
+    ELSIF p_branch_id = v_caller_branch_id THEN
+      v_effective_branch_id := v_caller_branch_id;
+    ELSE
+      -- Specific other branch selected: require query length >= 3 to prevent broad enumeration
+      IF pg_catalog.length(v_sanitized) < 3 THEN
+        RAISE EXCEPTION 'Cross-branch search requires at least 3 search characters';
+      END IF;
+      v_effective_branch_id := p_branch_id;
+    END IF;
+  END IF;
+
+  v_effective_limit := LEAST(GREATEST(COALESCE(p_limit, 20), 1), 20);
+  v_effective_offset := GREATEST(COALESCE(p_offset, 0), 0);
 
   RETURN QUERY
   SELECT 
@@ -1784,6 +1842,7 @@ BEGIN
     p.username,
     p.avatar_url,
     p.department,
+    -- Mask roll number: show only last 4 characters for privacy
     CASE
       WHEN p.student_id IS NOT NULL AND pg_catalog.length(p.student_id) > 4
         THEN pg_catalog.repeat('*', pg_catalog.length(p.student_id) - 4) || pg_catalog.right(p.student_id, 4)
@@ -1794,19 +1853,23 @@ BEGIN
     ab.branch_code
   FROM public.profiles p
   LEFT JOIN public.academic_branches ab ON ab.id = p.branch_id
-  WHERE (
-    v_sanitized = '' OR
-    p.username ILIKE ('%' || v_sanitized || '%') OR
-    p.student_id ILIKE ('%' || v_sanitized || '%') OR
-    p.department ILIKE ('%' || v_sanitized || '%')
-  )
-  AND (p_branch_id IS NULL OR p.branch_id = p_branch_id)
-  LIMIT LEAST(p_limit, 50);
+  WHERE p.is_verified = true
+    AND p.college_role = 'student'
+    AND (
+      v_sanitized = '' OR
+      p.username ILIKE ('%' || v_sanitized || '%') OR
+      p.student_id ILIKE ('%' || v_sanitized || '%') OR
+      p.department ILIKE ('%' || v_sanitized || '%')
+    )
+    AND (v_effective_branch_id IS NULL OR p.branch_id = v_effective_branch_id)
+  ORDER BY p.username ASC
+  LIMIT v_effective_limit
+  OFFSET v_effective_offset;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.search_campus_students(TEXT, UUID, INT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.search_campus_students(TEXT, UUID, INT) TO authenticated;
+REVOKE ALL ON FUNCTION public.search_campus_students(TEXT, UUID, INT, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.search_campus_students(TEXT, UUID, INT, INT) TO authenticated;
 
 -- 11. STRICT ROW LEVEL SECURITY FOR REGISTRIES
 ALTER TABLE public.academic_branches ENABLE ROW LEVEL SECURITY;
@@ -1916,159 +1979,256 @@ CREATE POLICY "Audience can view channel messages" ON public.channel_messages
     ))
   );
 
--- 13. AUTO-POPULATE branch_id TRIGGERS FROM CREATOR/AUTHOR
-CREATE OR REPLACE FUNCTION public.auto_set_post_branch_from_author()
+-- 13. ENFORCE AUTHOR/CREATOR BRANCH OWNERSHIP ON CONTENT (ANTI-SPOOFING)
+-- Strictly derives branch_id from verified user profile. Non-admins cannot supply mismatched branch or reassign branch on update.
+
+CREATE OR REPLACE FUNCTION public.enforce_post_branch_ownership()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_caller_id UUID := auth.uid();
+  v_is_admin BOOLEAN := false;
   v_author_branch_id UUID;
 BEGIN
-  IF NEW.branch_id IS NULL THEN
-    SELECT branch_id INTO v_author_branch_id
+  IF v_caller_id IS NOT NULL THEN
+    SELECT (college_role = 'college_admin') INTO v_is_admin
     FROM public.profiles
-    WHERE id = NEW.user_id;
-
-    IF v_author_branch_id IS NOT NULL THEN
-      NEW.branch_id := v_author_branch_id;
-    END IF;
+    WHERE id = v_caller_id;
   END IF;
+
+  IF COALESCE(v_is_admin, false) THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT branch_id INTO v_author_branch_id
+  FROM public.profiles
+  WHERE id = NEW.user_id;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM v_author_branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: Supplied branch_id does not match author verified branch';
+    END IF;
+    NEW.branch_id := v_author_branch_id;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: branch_id on posts cannot be modified by non-administrators';
+    END IF;
+    RETURN NEW;
+  END IF;
+
   RETURN NEW;
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_enforce_post_branch_ownership ON public.posts;
 DROP TRIGGER IF EXISTS trg_auto_set_post_branch ON public.posts;
-CREATE TRIGGER trg_auto_set_post_branch
-  BEFORE INSERT ON public.posts
+CREATE TRIGGER trg_enforce_post_branch_ownership
+  BEFORE INSERT OR UPDATE ON public.posts
   FOR EACH ROW
-  EXECUTE FUNCTION public.auto_set_post_branch_from_author();
+  EXECUTE FUNCTION public.enforce_post_branch_ownership();
 
-REVOKE ALL ON FUNCTION public.auto_set_post_branch_from_author() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_post_branch_ownership() FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION public.auto_set_event_branch_from_creator()
+CREATE OR REPLACE FUNCTION public.enforce_event_branch_ownership()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_caller_id UUID := auth.uid();
+  v_is_admin BOOLEAN := false;
   v_creator_branch_id UUID;
 BEGIN
-  IF NEW.branch_id IS NULL AND NEW.created_by IS NOT NULL THEN
-    SELECT branch_id INTO v_creator_branch_id
+  IF v_caller_id IS NOT NULL THEN
+    SELECT (college_role = 'college_admin') INTO v_is_admin
     FROM public.profiles
-    WHERE id = NEW.created_by;
-
-    IF v_creator_branch_id IS NOT NULL THEN
-      NEW.branch_id := v_creator_branch_id;
-    END IF;
+    WHERE id = v_caller_id;
   END IF;
+
+  IF COALESCE(v_is_admin, false) THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT branch_id INTO v_creator_branch_id
+  FROM public.profiles
+  WHERE id = NEW.created_by;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM v_creator_branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: Supplied branch_id does not match creator verified branch';
+    END IF;
+    NEW.branch_id := v_creator_branch_id;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: branch_id on events cannot be modified by non-administrators';
+    END IF;
+    RETURN NEW;
+  END IF;
+
   RETURN NEW;
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_enforce_event_branch_ownership ON public.events;
 DROP TRIGGER IF EXISTS trg_auto_set_event_branch ON public.events;
-CREATE TRIGGER trg_auto_set_event_branch
-  BEFORE INSERT ON public.events
+CREATE TRIGGER trg_enforce_event_branch_ownership
+  BEFORE INSERT OR UPDATE ON public.events
   FOR EACH ROW
-  EXECUTE FUNCTION public.auto_set_event_branch_from_creator();
+  EXECUTE FUNCTION public.enforce_event_branch_ownership();
 
-REVOKE ALL ON FUNCTION public.auto_set_event_branch_from_creator() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_event_branch_ownership() FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION public.auto_set_club_branch_from_creator()
+CREATE OR REPLACE FUNCTION public.enforce_club_branch_ownership()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_caller_id UUID := auth.uid();
+  v_is_admin BOOLEAN := false;
   v_creator_branch_id UUID;
 BEGIN
-  IF NEW.branch_id IS NULL AND NEW.created_by IS NOT NULL THEN
-    SELECT branch_id INTO v_creator_branch_id
+  IF v_caller_id IS NOT NULL THEN
+    SELECT (college_role = 'college_admin') INTO v_is_admin
     FROM public.profiles
-    WHERE id = NEW.created_by;
-
-    IF v_creator_branch_id IS NOT NULL THEN
-      NEW.branch_id := v_creator_branch_id;
-    END IF;
+    WHERE id = v_caller_id;
   END IF;
+
+  IF COALESCE(v_is_admin, false) THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT branch_id INTO v_creator_branch_id
+  FROM public.profiles
+  WHERE id = NEW.created_by;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM v_creator_branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: Supplied branch_id does not match creator verified branch';
+    END IF;
+    NEW.branch_id := v_creator_branch_id;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: branch_id on clubs cannot be modified by non-administrators';
+    END IF;
+    RETURN NEW;
+  END IF;
+
   RETURN NEW;
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_enforce_club_branch_ownership ON public.clubs;
 DROP TRIGGER IF EXISTS trg_auto_set_club_branch ON public.clubs;
-CREATE TRIGGER trg_auto_set_club_branch
-  BEFORE INSERT ON public.clubs
+CREATE TRIGGER trg_enforce_club_branch_ownership
+  BEFORE INSERT OR UPDATE ON public.clubs
   FOR EACH ROW
-  EXECUTE FUNCTION public.auto_set_club_branch_from_creator();
+  EXECUTE FUNCTION public.enforce_club_branch_ownership();
 
-REVOKE ALL ON FUNCTION public.auto_set_club_branch_from_creator() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_club_branch_ownership() FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION public.auto_set_message_branch_from_sender()
+CREATE OR REPLACE FUNCTION public.enforce_message_branch_ownership()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_caller_id UUID := auth.uid();
+  v_is_admin BOOLEAN := false;
   v_sender_branch_id UUID;
 BEGIN
-  IF NEW.branch_id IS NULL AND NEW.sender_id IS NOT NULL THEN
-    SELECT branch_id INTO v_sender_branch_id
+  IF v_caller_id IS NOT NULL THEN
+    SELECT (college_role = 'college_admin') INTO v_is_admin
     FROM public.profiles
-    WHERE id = NEW.sender_id;
-
-    IF v_sender_branch_id IS NOT NULL THEN
-      NEW.branch_id := v_sender_branch_id;
-    END IF;
+    WHERE id = v_caller_id;
   END IF;
+
+  IF COALESCE(v_is_admin, false) THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT branch_id INTO v_sender_branch_id
+  FROM public.profiles
+  WHERE id = NEW.sender_id;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM v_sender_branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: Supplied branch_id does not match sender verified branch';
+    END IF;
+    NEW.branch_id := v_sender_branch_id;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.branch_id IS DISTINCT FROM OLD.branch_id THEN
+      RAISE EXCEPTION 'Unauthorized: branch_id on messages cannot be modified by non-administrators';
+    END IF;
+    RETURN NEW;
+  END IF;
+
   RETURN NEW;
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_enforce_message_branch_ownership ON public.channel_messages;
 DROP TRIGGER IF EXISTS trg_auto_set_message_branch ON public.channel_messages;
-CREATE TRIGGER trg_auto_set_message_branch
-  BEFORE INSERT ON public.channel_messages
+CREATE TRIGGER trg_enforce_message_branch_ownership
+  BEFORE INSERT OR UPDATE ON public.channel_messages
   FOR EACH ROW
-  EXECUTE FUNCTION public.auto_set_message_branch_from_sender();
+  EXECUTE FUNCTION public.enforce_message_branch_ownership();
 
-REVOKE ALL ON FUNCTION public.auto_set_message_branch_from_sender() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_message_branch_ownership() FROM PUBLIC;
 
--- 14. COMPREHENSIVE BACKFILL & VALIDATION FOR EXISTING PROFILES AND CONTENT
+-- 14. COMPREHENSIVE BACKFILL: ENFORCE VERIFIED ENROLLMENT AGAINST STUDENT DIRECTORY
+-- Profiles without an active directory record remain unverified and branchless.
 DO $$
 DECLARE
   v_rec RECORD;
-  v_branch_id UUID;
-  v_display_name TEXT;
 BEGIN
+  -- A. Backfill profiles ONLY when an exact active directory entry exists
   FOR v_rec IN 
-    SELECT p.id, p.student_id
+    SELECT p.id, sd.roll_number, sd.branch_id, ab.display_name
     FROM public.profiles p
+    JOIN public.student_directory sd
+      ON sd.roll_number = pg_catalog.upper(pg_catalog.btrim(p.student_id))
+     AND sd.is_active = true
+     AND (sd.profile_id IS NULL OR sd.profile_id = p.id)
+    JOIN public.academic_branches ab ON ab.id = sd.branch_id
     WHERE p.student_id IS NOT NULL 
-      AND pg_catalog.trim(p.student_id) != ''
+      AND pg_catalog.btrim(p.student_id) != ''
       AND p.branch_id IS NULL
   LOOP
-    SELECT ab.id, ab.display_name INTO v_branch_id, v_display_name
-    FROM public.academic_branch_prefixes abp
-    JOIN public.academic_branches ab ON ab.id = abp.branch_id
-    WHERE pg_catalog.left(pg_catalog.upper(pg_catalog.trim(v_rec.student_id)), pg_catalog.length(abp.prefix)) = abp.prefix
-      AND abp.is_active = true
-    ORDER BY pg_catalog.length(abp.prefix) DESC
-    LIMIT 1;
+    -- Claim directory entry
+    UPDATE public.student_directory
+    SET profile_id = v_rec.id
+    WHERE roll_number = v_rec.roll_number;
 
-    IF v_branch_id IS NOT NULL THEN
-      UPDATE public.profiles
-      SET branch_id = v_branch_id,
-          department = v_display_name,
-          updated_at = pg_catalog.now()
-      WHERE id = v_rec.id;
-    END IF;
+    -- Update profile verified status
+    UPDATE public.profiles
+    SET branch_id = v_rec.branch_id,
+        department = v_rec.display_name,
+        is_verified = true,
+        updated_at = pg_catalog.now()
+    WHERE id = v_rec.id;
   END LOOP;
 END $$;
 
+-- B. Backfill posts from verified author profiles
 UPDATE public.posts p
 SET branch_id = pr.branch_id
 FROM public.profiles pr
@@ -2076,6 +2236,7 @@ WHERE p.user_id = pr.id
   AND p.branch_id IS NULL
   AND pr.branch_id IS NOT NULL;
 
+-- C. Backfill events from verified creator profiles
 UPDATE public.events e
 SET branch_id = pr.branch_id
 FROM public.profiles pr
@@ -2083,6 +2244,7 @@ WHERE e.created_by = pr.id
   AND e.branch_id IS NULL
   AND pr.branch_id IS NOT NULL;
 
+-- D. Backfill clubs from verified creator profiles
 UPDATE public.clubs c
 SET branch_id = pr.branch_id
 FROM public.profiles pr
@@ -2090,11 +2252,32 @@ WHERE c.created_by = pr.id
   AND c.branch_id IS NULL
   AND pr.branch_id IS NOT NULL;
 
+-- E. Backfill channel messages from verified sender profiles
 UPDATE public.channel_messages m
 SET branch_id = pr.branch_id
 FROM public.profiles pr
 WHERE m.sender_id = pr.id
   AND m.branch_id IS NULL
   AND pr.branch_id IS NOT NULL;
+
+-- F. Administrative Review View for unlinked or unverified student profiles
+CREATE OR REPLACE VIEW public.unverified_students_needing_review AS
+SELECT 
+  p.id AS profile_id,
+  p.username,
+  p.student_id,
+  p.created_at,
+  CASE
+    WHEN p.student_id IS NULL OR pg_catalog.btrim(p.student_id) = '' THEN 'missing_student_id'
+    WHEN NOT EXISTS (SELECT 1 FROM public.student_directory sd WHERE sd.roll_number = pg_catalog.upper(pg_catalog.btrim(p.student_id))) THEN 'not_in_student_directory'
+    WHEN EXISTS (SELECT 1 FROM public.student_directory sd WHERE sd.roll_number = pg_catalog.upper(pg_catalog.btrim(p.student_id)) AND sd.is_active = false) THEN 'directory_entry_inactive'
+    WHEN EXISTS (SELECT 1 FROM public.student_directory sd WHERE sd.roll_number = pg_catalog.upper(pg_catalog.btrim(p.student_id)) AND sd.profile_id IS NOT NULL AND sd.profile_id != p.id) THEN 'directory_claimed_by_other_profile'
+    ELSE 'pending_claim'
+  END AS review_reason
+FROM public.profiles p
+WHERE p.college_role = 'student'
+  AND (p.is_verified = false OR p.branch_id IS NULL);
+
+GRANT SELECT ON public.unverified_students_needing_review TO authenticated;
 
 

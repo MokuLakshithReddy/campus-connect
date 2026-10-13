@@ -4,12 +4,15 @@
  * Runs end-to-end against a real PostgreSQL instance (e.g. GitHub Actions Postgres service container):
  * 1. Bootstraps auth schema & extensions
  * 2. Applies the full master schema (supabase/schema.sql) on a clean database
- * 3. Verifies student directory linking with row locking (SELECT ... FOR UPDATE)
- * 4. Verifies duplicate claim conflict rejection
- * 5. Verifies immutability of student academic fields
- * 6. Verifies prevention of self-granting college_admin (both INSERT and UPDATE paths)
- * 7. Verifies privacy masking in search_campus_students
- * 8. Verifies PostgreSQL Row Level Security (RLS) audience enforcement (college vs branch)
+ * 3. Tests transactional identity verification (BEGIN -> SET LOCAL ROLE authenticated -> SELECT auth.uid())
+ * 4. Verifies student directory linking with row locking (SELECT ... FOR UPDATE)
+ * 5. Verifies duplicate claim conflict rejection (fail-closed)
+ * 6. Verifies immutability of student academic fields
+ * 7. Verifies prevention of self-granting college_admin (both INSERT and UPDATE paths)
+ * 8. Verifies anti-spoofing branch triggers on posts (rejects mismatched branch on INSERT and UPDATE)
+ * 9. Verifies threat model: direct alteration of is_verified without sync RPC is blocked
+ * 10. Verifies search_campus_students privacy scoping, cross-branch rules, and unverified filtering
+ * 11. Verifies PostgreSQL Row Level Security (RLS) audience enforcement (college vs branch)
  */
 
 const fs = require('fs');
@@ -19,9 +22,36 @@ const { Client } = require('pg');
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:postgrespassword@localhost:5432/postgres';
 
+async function withAuthenticatedSession(client, userId, callback) {
+  await client.query('BEGIN;');
+  try {
+    await client.query(`
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${userId}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+    `);
+
+    // Verify session identity before executing test operation
+    const verify = await client.query('SELECT auth.uid() AS uid, current_user AS role;');
+    if (verify.rows[0].uid !== userId) {
+      throw new Error(`Session identity verification failed: expected ${userId}, got ${verify.rows[0].uid}`);
+    }
+    if (verify.rows[0].role !== 'authenticated') {
+      throw new Error(`Session role verification failed: expected authenticated, got ${verify.rows[0].role}`);
+    }
+
+    const result = await callback();
+    await client.query('COMMIT;');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK;').catch(() => {});
+    throw err;
+  }
+}
+
 async function runCiIntegrationTests() {
   console.log('================================================================================');
-  console.log('RUNNING POSTGRESQL CI INTEGRATION TESTS');
+  console.log('RUNNING POSTGRESQL CI INTEGRATION TESTS (TRANSACTIONAL IDENTITIES & SECURITY ENGINE)');
   console.log(`Connecting to: ${DATABASE_URL.replace(/:[^:@]*@/, ':****@')}`);
   console.log('================================================================================\n');
 
@@ -116,9 +146,11 @@ async function runCiIntegrationTests() {
       throw new Error(`Failed to resolve roll number: ${JSON.stringify(resolveRes.rows)}`);
     }
 
-    // Fixtures Setup
+    // Setup Test Fixtures
     const aimlBranch = await client.query("SELECT id FROM public.academic_branches WHERE course='B.Tech' AND branch_code='CSE-AIML';");
+    const cseBranch = await client.query("SELECT id FROM public.academic_branches WHERE course='B.Tech' AND branch_code='CSE';");
     const aimlBranchId = aimlBranch.rows[0].id;
+    const cseBranchId = cseBranch.rows[0].id;
 
     await client.query(`
       INSERT INTO public.student_directory (roll_number, branch_id, admission_year, is_active)
@@ -142,19 +174,17 @@ async function runCiIntegrationTests() {
       `user2_${testRunId}`
     ]);
 
-    // TEST 3: User 1 Directory Linking Flow
+    // TEST 3: User 1 Directory Linking Flow with Transactional Identity
     total++;
-    process.stdout.write('[Test 3] Testing directory account-linking flow (User 1 claiming record)... ');
-    await client.query(`
-      SET LOCAL request.jwt.claim.sub = '${user1Id}';
-      SET LOCAL request.jwt.claim.role = 'authenticated';
-    `);
-    const linkRes = await client.query(`SELECT public.sync_authenticated_student_directory() AS res;`);
+    process.stdout.write('[Test 3] Testing directory account-linking flow (User 1 transactional claim)... ');
+    const linkRes = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT public.sync_authenticated_student_directory() AS res;`);
+    });
     const linkObj = linkRes.rows[0]?.res;
     if (linkObj && linkObj.linked === true && linkObj.roll_number === testRoll) {
       const profCheck = await client.query(`SELECT is_verified, branch_id FROM public.profiles WHERE id = $1;`, [user1Id]);
       if (profCheck.rows[0]?.is_verified === true && profCheck.rows[0]?.branch_id === aimlBranchId) {
-        console.log('PASSED (Row locked, claimed, is_verified=true)');
+        console.log('PASSED (Identity verified in txn, row locked, claimed, is_verified=true)');
         passed++;
       } else {
         throw new Error(`Profile was not updated properly: ${JSON.stringify(profCheck.rows)}`);
@@ -165,14 +195,12 @@ async function runCiIntegrationTests() {
 
     // TEST 4: Conflict Rejection (Fail-closed on already claimed directory record)
     total++;
-    process.stdout.write('[Test 4] Testing conflict rejection (User 2 attempting duplicate claim)... ');
+    process.stdout.write('[Test 4] Testing conflict rejection (User 2 duplicate claim inside txn)... ');
     let conflictRejected = false;
     try {
-      await client.query(`
-        SET LOCAL request.jwt.claim.sub = '${user2Id}';
-        SET LOCAL request.jwt.claim.role = 'authenticated';
-        SELECT public.sync_authenticated_student_directory() AS res;
-      `);
+      await withAuthenticatedSession(client, user2Id, async () => {
+        await client.query(`SELECT public.sync_authenticated_student_directory() AS res;`);
+      });
     } catch (err) {
       if (err.message.includes('already linked') || err.message.includes('Directory record already linked')) {
         conflictRejected = true;
@@ -192,13 +220,11 @@ async function runCiIntegrationTests() {
     process.stdout.write('[Test 5] Testing academic field immutability for verified student... ');
     let tamperingBlocked = false;
     try {
-      await client.query(`
-        SET LOCAL request.jwt.claim.sub = '${user1Id}';
-        SET LOCAL request.jwt.claim.role = 'authenticated';
-        UPDATE public.profiles SET student_id = '25MVCSMR0099' WHERE id = '${user1Id}';
-      `);
+      await withAuthenticatedSession(client, user1Id, async () => {
+        await client.query(`UPDATE public.profiles SET student_id = '25MVCSMR0099' WHERE id = '${user1Id}';`);
+      });
     } catch (err) {
-      if (err.message.includes('Student roll number cannot be modified') || err.message.includes('Unauthorized')) {
+      if (err.message.includes('Student roll number cannot be modified') || err.message.includes('permission denied')) {
         tamperingBlocked = true;
       }
     }
@@ -214,18 +240,16 @@ async function runCiIntegrationTests() {
     process.stdout.write('[Test 6] Testing privilege escalation protection on UPDATE... ');
     let escalationBlocked = false;
     try {
-      await client.query(`
-        SET LOCAL request.jwt.claim.sub = '${user1Id}';
-        SET LOCAL request.jwt.claim.role = 'authenticated';
-        UPDATE public.profiles SET college_role = 'college_admin' WHERE id = '${user1Id}';
-      `);
+      await withAuthenticatedSession(client, user1Id, async () => {
+        await client.query(`UPDATE public.profiles SET college_role = 'college_admin' WHERE id = '${user1Id}';`);
+      });
     } catch (err) {
-      if (err.message.includes('College role cannot be self-modified') || err.message.includes('Unauthorized')) {
+      if (err.message.includes('College role cannot be self-modified') || err.message.includes('permission denied')) {
         escalationBlocked = true;
       }
     }
     if (escalationBlocked) {
-      console.log('PASSED (Self-escalation to college_admin rejected by PostgreSQL trigger)');
+      console.log('PASSED (Self-escalation to college_admin rejected by PostgreSQL)');
       passed++;
     } else {
       throw new Error('Student was able to self-escalate college_role to college_admin!');
@@ -235,12 +259,12 @@ async function runCiIntegrationTests() {
     total++;
     process.stdout.write('[Test 7] Testing privilege escalation protection on INSERT... ');
     const evilUserId = crypto.randomUUID();
-    await client.query(`
-      SET LOCAL request.jwt.claim.sub = '${evilUserId}';
-      SET LOCAL request.jwt.claim.role = 'authenticated';
-      INSERT INTO public.profiles (id, username, college_role, is_verified)
-      VALUES ('${evilUserId}', 'evil_${testRunId}', 'college_admin', true);
-    `);
+    await withAuthenticatedSession(client, evilUserId, async () => {
+      await client.query(`
+        INSERT INTO public.profiles (id, username, college_role, is_verified)
+        VALUES ('${evilUserId}', 'evil_${testRunId}', 'college_admin', true);
+      `);
+    });
     const evilProfile = await client.query(`SELECT college_role, is_verified FROM public.profiles WHERE id = $1;`, [evilUserId]);
     if (evilProfile.rows[0]?.college_role === 'student' && evilProfile.rows[0]?.is_verified === false) {
       console.log('PASSED (Non-admin INSERT automatically forced to college_role=student, is_verified=false)');
@@ -250,25 +274,128 @@ async function runCiIntegrationTests() {
     }
     await client.query(`DELETE FROM public.profiles WHERE id = $1;`, [evilUserId]);
 
-    // TEST 8: Privacy Masking in search_campus_students RPC
+    // TEST 8: Anti-Spoofing: Reject Mismatched Branch on Post INSERT
     total++;
-    process.stdout.write('[Test 8] Testing search_campus_students roll number masking... ');
-    const searchRes = await client.query(`
-      SET LOCAL request.jwt.claim.sub = '${user1Id}';
-      SET LOCAL request.jwt.claim.role = 'authenticated';
-      SELECT * FROM public.search_campus_students($1, NULL, 5);
-    `, [`user1_${testRunId}`]);
-    const maskedStudent = searchRes.rows[0];
-    if (maskedStudent && maskedStudent.student_id.startsWith('****') && maskedStudent.student_id.endsWith(testRoll.slice(-4))) {
-      console.log(`PASSED (Roll number masked as: ${maskedStudent.student_id})`);
+    process.stdout.write('[Test 8] Testing anti-spoofing on post INSERT (reject mismatched branch)... ');
+    let spoofBlockedOnInsert = false;
+    try {
+      await withAuthenticatedSession(client, user1Id, async () => {
+        // user1 is verified in AIML. Attempt to create post with CSE branch
+        await client.query(`
+          INSERT INTO public.posts (id, user_id, branch_id, content_visibility, image_url, caption)
+          VALUES ('${crypto.randomUUID()}', '${user1Id}', '${cseBranchId}', 'branch', 'https://example.com/spoof.jpg', 'Spoofed branch');
+        `);
+      });
+    } catch (err) {
+      if (err.message.includes('Supplied branch_id does not match') || err.message.includes('Unauthorized')) {
+        spoofBlockedOnInsert = true;
+      }
+    }
+    if (spoofBlockedOnInsert) {
+      console.log('PASSED (Mismatched branch_id on INSERT rejected by trigger)');
       passed++;
     } else {
-      throw new Error(`Roll number was not properly masked: ${JSON.stringify(searchRes.rows)}`);
+      throw new Error('User was able to spoof branch_id on post INSERT!');
     }
 
-    // TEST 9: Database-Level Audience RLS Policies
+    // TEST 9: Anti-Spoofing: Reject Branch Modification on Post UPDATE
     total++;
-    process.stdout.write('[Test 9] Testing database-level audience RLS policies (branch vs college)... ');
+    process.stdout.write('[Test 9] Testing anti-spoofing on post UPDATE (reject branch alteration)... ');
+    const user1PostId = crypto.randomUUID();
+    await client.query(`
+      INSERT INTO public.posts (id, user_id, branch_id, content_visibility, image_url, caption)
+      VALUES ('${user1PostId}', '${user1Id}', '${aimlBranchId}', 'branch', 'https://example.com/orig.jpg', 'Original post');
+    `);
+
+    let spoofBlockedOnUpdate = false;
+    try {
+      await withAuthenticatedSession(client, user1Id, async () => {
+        await client.query(`
+          UPDATE public.posts SET branch_id = '${cseBranchId}' WHERE id = '${user1PostId}';
+        `);
+      });
+    } catch (err) {
+      if (err.message.includes('cannot be modified by non-administrators') || err.message.includes('Unauthorized')) {
+        spoofBlockedOnUpdate = true;
+      }
+    }
+    if (spoofBlockedOnUpdate) {
+      console.log('PASSED (branch_id alteration on UPDATE rejected by trigger)');
+      passed++;
+    } else {
+      throw new Error('User was able to modify branch_id on existing post!');
+    }
+    await client.query(`DELETE FROM public.posts WHERE id = '${user1PostId}';`);
+
+    // TEST 10: Threat Model: Reject Direct Alteration of is_verified without Trusted RPC
+    total++;
+    process.stdout.write('[Test 10] Testing threat model: Direct profile verification bypass attempt... ');
+    let directVerifyBlocked = false;
+    try {
+      await withAuthenticatedSession(client, user2Id, async () => {
+        await client.query(`UPDATE public.profiles SET is_verified = true WHERE id = '${user2Id}';`);
+      });
+    } catch (err) {
+      if (err.message.includes('permission denied') || err.message.includes('Verification status cannot be modified') || err.message.includes('Unauthorized')) {
+        directVerifyBlocked = true;
+      }
+    }
+    if (directVerifyBlocked) {
+      console.log('PASSED (Direct alteration of is_verified blocked by database permissions/call-stack trigger)');
+      passed++;
+    } else {
+      throw new Error('User was able to directly modify is_verified on profiles!');
+    }
+
+    // TEST 11: Privacy & Scoping in search_campus_students RPC
+    total++;
+    process.stdout.write('[Test 11] Testing search_campus_students privacy scoping and cross-branch rules... ');
+    
+    // A. Unverified user2 cannot search
+    let unverifiedSearchBlocked = false;
+    try {
+      await withAuthenticatedSession(client, user2Id, async () => {
+        await client.query(`SELECT * FROM public.search_campus_students('', NULL, 5);`);
+      });
+    } catch (err) {
+      if (err.message.includes('Access restricted') || err.message.includes('Only verified')) {
+        unverifiedSearchBlocked = true;
+      }
+    }
+    if (!unverifiedSearchBlocked) {
+      throw new Error('Unverified user was allowed to search student directory!');
+    }
+
+    // B. Verified user1 searching another branch with short query (<3 chars) must be rejected
+    let shortQueryCrossBranchBlocked = false;
+    try {
+      await withAuthenticatedSession(client, user1Id, async () => {
+        await client.query(`SELECT * FROM public.search_campus_students('a', '${cseBranchId}', 5);`);
+      });
+    } catch (err) {
+      if (err.message.includes('Cross-branch search requires at least 3') || err.message.includes('Access restricted')) {
+        shortQueryCrossBranchBlocked = true;
+      }
+    }
+    if (!shortQueryCrossBranchBlocked) {
+      throw new Error('Cross-branch search with <3 characters was not rejected!');
+    }
+
+    // C. Verified user1 searching own branch succeeds and masks roll number
+    const ownBranchSearch = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT * FROM public.search_campus_students('', NULL, 5);`);
+    });
+    const foundUser1 = ownBranchSearch.rows.find(r => r.id === user1Id);
+    if (foundUser1 && foundUser1.student_id.startsWith('****') && foundUser1.student_id.endsWith(testRoll.slice(-4))) {
+      console.log('PASSED (Unverified blocked, cross-branch scraping blocked, own branch masked)');
+      passed++;
+    } else {
+      throw new Error(`Search student check failed: ${JSON.stringify(ownBranchSearch.rows)}`);
+    }
+
+    // TEST 12: Database-Level Audience RLS Policies
+    total++;
+    process.stdout.write('[Test 12] Testing database-level audience RLS policies (branch vs college)... ');
     const testPostCollegeId = crypto.randomUUID();
     const testPostBranchId = crypto.randomUUID();
 
@@ -280,22 +407,14 @@ async function runCiIntegrationTests() {
     `);
 
     // User 1 (in AIML) queries posts under RLS
-    const user1Posts = await client.query(`
-      SET ROLE authenticated;
-      SET request.jwt.claim.sub = '${user1Id}';
-      SET request.jwt.claim.role = 'authenticated';
-      SELECT id FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');
-      RESET ROLE;
-    `);
+    const user1Posts = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT id FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');`);
+    });
 
-    // User 2 (not linked to AIML) queries posts under RLS
-    const user2Posts = await client.query(`
-      SET ROLE authenticated;
-      SET request.jwt.claim.sub = '${user2Id}';
-      SET request.jwt.claim.role = 'authenticated';
-      SELECT id FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');
-      RESET ROLE;
-    `);
+    // User 2 (not in AIML) queries posts under RLS
+    const user2Posts = await withAuthenticatedSession(client, user2Id, async () => {
+      return await client.query(`SELECT id FROM public.posts WHERE id IN ('${testPostCollegeId}', '${testPostBranchId}');`);
+    });
 
     const user1Ids = user1Posts.rows.map(p => p.id);
     const user2Ids = user2Posts.rows.map(p => p.id);

@@ -130,6 +130,13 @@ const Explore = () => {
       return;
     }
 
+    // Cross-branch directory discovery requires at least 3 characters
+    if (branchId === "All" && sanitized.length < 3) {
+      setMatchingUsers([]);
+      setLoadingUsers(false);
+      return;
+    }
+
     setLoadingUsers(true);
     try {
       const { data, error } = await supabase.rpc("search_campus_students", {
