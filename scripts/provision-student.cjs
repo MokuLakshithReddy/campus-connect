@@ -184,10 +184,13 @@ async function provisionStudent() {
   console.log(`  - Admission Year: ${dirEntry.admission_year}`);
   console.log(`  - Roster integrity validated against roll number prefix '${branchResolution.prefix}'`);
 
-  // Step 3: Check existing directory ownership BEFORE creating an auth account
+  // Step 3: Check existing directory ownership and profile existence BEFORE creating an auth account
+  console.log(`[Ownership Check] Validating directory ownership and checking for account conflicts...`);
   let expectedUserId = dirEntry.profile_id || null;
+
+  // 3a. If directory record is already linked to a profile_id
   if (dirEntry.profile_id) {
-    console.log(`[Ownership Check] Directory record is already linked to profile ${dirEntry.profile_id}. Verifying account ownership...`);
+    console.log(`- Directory record is already linked to profile ${dirEntry.profile_id}. Verifying account ownership...`);
     const linkedProfileOptions = {
       hostname: SUPABASE_PROJECT_URL,
       path: `/rest/v1/profiles?id=eq.${encodeURIComponent(dirEntry.profile_id)}&select=id,username,student_id,college_role,is_verified,must_change_password`,
@@ -218,6 +221,34 @@ async function provisionStudent() {
       process.exit(1);
     }
     console.log(`- Verified: Existing linked profile ${linkedProf.id} matches roll number ${rollNumber}.`);
+  }
+
+  // 3b. Verify whether any existing profile already claims this student_id or username
+  const existingProfileOptions = {
+    hostname: SUPABASE_PROJECT_URL,
+    path: `/rest/v1/profiles?or=(student_id.eq.${encodeURIComponent(rollNumber)},username.eq.${encodeURIComponent(rollNumber)})&select=id,username,student_id,college_role,is_verified,must_change_password`,
+    method: 'GET',
+    headers: {
+      'apikey': SERVICE_ROLE_KEY,
+      'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+    }
+  };
+
+  const existingProfRes = await sendRequest(existingProfileOptions);
+  if (existingProfRes.statusCode >= 200 && existingProfRes.statusCode < 300 && Array.isArray(existingProfRes.body) && existingProfRes.body.length > 0) {
+    const existingProf = existingProfRes.body[0];
+    if (!dirEntry.profile_id) {
+      console.error(`ERROR: Ownership conflict! Profile ${existingProf.id} already exists for roll number ${rollNumber}, but official directory entry has profile_id = NULL.`);
+      console.error(`Provisioning aborted without creating or modifying any authentication accounts.`);
+      process.exit(1);
+    }
+    if (dirEntry.profile_id !== existingProf.id) {
+      console.error(`ERROR: Ownership conflict! Directory record is linked to ${dirEntry.profile_id}, but existing profile for ${rollNumber} is ${existingProf.id}.`);
+      console.error(`Provisioning aborted without creating or modifying any authentication accounts.`);
+      process.exit(1);
+    }
+    expectedUserId = existingProf.id;
+    console.log(`- Verified: Profile ${existingProf.id} is uniquely and consistently associated with directory record.`);
   }
 
   // Step 4: Account provisioning in auth.users
@@ -267,9 +298,29 @@ async function provisionStudent() {
   }
 
   // Step 5: Full Invariant Validation on Profile State
+  if (!userId) {
+    const fallbackLookup = await sendRequest({
+      hostname: SUPABASE_PROJECT_URL,
+      path: `/rest/v1/profiles?student_id=eq.${encodeURIComponent(rollNumber)}&select=id`,
+      method: 'GET',
+      headers: {
+        'apikey': SERVICE_ROLE_KEY,
+        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+      }
+    });
+    if (fallbackLookup.body && Array.isArray(fallbackLookup.body) && fallbackLookup.body[0]?.id) {
+      userId = fallbackLookup.body[0].id;
+    }
+  }
+
+  if (!userId) {
+    console.error(`ERROR: Could not resolve auth or profile user ID for ${rollNumber}.`);
+    process.exit(1);
+  }
+
   const profileOptions = {
     hostname: SUPABASE_PROJECT_URL,
-    path: `/rest/v1/profiles?student_id=eq.${encodeURIComponent(rollNumber)}&select=id,username,student_id,college_role,is_verified,must_change_password`,
+    path: `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=id,username,student_id,college_role,is_verified,must_change_password`,
     method: 'GET',
     headers: {
       'apikey': SERVICE_ROLE_KEY,

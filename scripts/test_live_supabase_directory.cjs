@@ -32,10 +32,11 @@ if (!PROJECT_REF) {
   process.exit(1);
 }
 
-if (PROJECT_REF === KNOWN_PRODUCTION_PROJECT_REF && process.env.ALLOW_PRODUCTION_TEST_RUN !== 'true') {
-  console.error(`SAFETY GUARD ACTIVE: Target project reference matches production (${PROJECT_REF}).`);
-  console.error('Refusing to execute mutating live test suites against production.');
-  console.error('To override this safety barrier deliberately, set ALLOW_PRODUCTION_TEST_RUN=true.');
+// STRICT MUTATING SAFETY GUARD: Never execute mutating integration suites against production database
+if (PROJECT_REF === KNOWN_PRODUCTION_PROJECT_REF) {
+  console.error(`FATAL SAFETY GUARD: Target project reference is production (${PROJECT_REF}).`);
+  console.error('Mutating live test suites are strictly prohibited from targeting the production database.');
+  console.error('You MUST supply a dedicated staging or local Supabase test project reference.');
   process.exit(1);
 }
 

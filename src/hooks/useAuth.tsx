@@ -175,11 +175,27 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     });
     if (error) throw error;
 
-    if (data.user) {
-      const prof = await fetchProfile(data.user.id);
-      return prof ? prof.must_change_password : false;
+    if (!data.user) {
+      throw new Error("Authentication failed: No user returned by authentication provider.");
     }
-    return false;
+
+    const prof = await fetchProfile(data.user.id);
+    if (!prof) {
+      // Fail closed: Profile could not be resolved from get_my_profile() or fallback query.
+      // CRITICAL SECURITY: Never return false to mean "password change not required" when profile is unavailable!
+      const reason = profileError || "Account profile record could not be loaded or verified.";
+      throw new Error(
+        `Profile resolution failed (${reason}). Access to campus application routes is restricted.`
+      );
+    }
+
+    if (!prof.is_verified) {
+      throw new Error(
+        "Account directory verification is pending or incomplete. Access to campus application routes is restricted."
+      );
+    }
+
+    return prof.must_change_password;
   };
 
   const completePasswordChange = async (newPassword: string) => {

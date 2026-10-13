@@ -47,6 +47,16 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
       />
     );
   }
+  if (!profile.is_verified) {
+    return (
+      <AuthErrorScreen
+        error="Your account directory verification is pending or incomplete. Access to campus application routes is restricted."
+        onRetry={refreshProfile}
+        onSignOut={signOut}
+        isLoading={loading}
+      />
+    );
+  }
   if (mustChangePassword) return <Navigate to="/change-password" replace />;
   return <>{children}</>;
 };
@@ -66,6 +76,16 @@ const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) =
     return (
       <AuthErrorScreen
         error={profileError || "Account profile record could not be loaded."}
+        onRetry={refreshProfile}
+        onSignOut={signOut}
+        isLoading={loading}
+      />
+    );
+  }
+  if (!profile.is_verified) {
+    return (
+      <AuthErrorScreen
+        error="Your account directory verification is pending or incomplete. Access to campus application routes is restricted."
         onRetry={refreshProfile}
         onSignOut={signOut}
         isLoading={loading}
@@ -92,6 +112,16 @@ const AuthRoute = ({ children }: { children: React.ReactNode }) => {
       return (
         <AuthErrorScreen
           error={profileError || "Account profile record could not be loaded."}
+          onRetry={refreshProfile}
+          onSignOut={signOut}
+          isLoading={loading}
+        />
+      );
+    }
+    if (!profile.is_verified) {
+      return (
+        <AuthErrorScreen
+          error="Your account directory verification is pending or incomplete. Access to campus application routes is restricted."
           onRetry={refreshProfile}
           onSignOut={signOut}
           isLoading={loading}

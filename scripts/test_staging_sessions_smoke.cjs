@@ -28,10 +28,11 @@ if (!PROJECT_REF) {
   process.exit(1);
 }
 
-if (PROJECT_REF === KNOWN_PRODUCTION_PROJECT_REF && process.env.ALLOW_PRODUCTION_TEST_RUN !== 'true') {
-  console.error(`SAFETY GUARD ACTIVE: Target project reference matches production (${PROJECT_REF}).`);
-  console.error('Refusing to execute mutating live test suites against production.');
-  console.error('To override this safety barrier deliberately, set ALLOW_PRODUCTION_TEST_RUN=true.');
+// STRICT MUTATING SAFETY GUARD: Never execute mutating integration suites against production database
+if (PROJECT_REF === KNOWN_PRODUCTION_PROJECT_REF) {
+  console.error(`FATAL SAFETY GUARD: Target project reference is production (${PROJECT_REF}).`);
+  console.error('Mutating live test suites are strictly prohibited from targeting the production database.');
+  console.error('You MUST supply a dedicated staging or local Supabase test project reference.');
   process.exit(1);
 }
 
@@ -407,21 +408,46 @@ async function runStagingSmokeTest() {
     console.log('================================================================================\n');
 
   } finally {
-    try {
-      await querySql(`
-        DELETE FROM public.event_registrations WHERE event_id IN ('${event1Id}', '${event2Id}');
-        DELETE FROM public.events WHERE id IN ('${event1Id}', '${event2Id}');
-        DELETE FROM public.club_memberships WHERE club_id IN ('${club1Id}', '${club2Id}');
-        DELETE FROM public.clubs WHERE id IN ('${club1Id}', '${club2Id}');
-        DELETE FROM auth.users WHERE id IN (
-          '${unverifiedStudentId}', '${verifiedStudentId}', '${organizerId}', 
-          '${outsiderOrganizerId}', '${targetStudentId}'
-        );
-      `);
-      console.log('Staging test fixtures cleaned up successfully.');
-    } catch (e) {
-      console.error('Cleanup notice:', e.message);
+    console.log('\n[Teardown] Cleaning up all registered staging test fixtures...');
+    const userIds = [unverifiedStudentId, verifiedStudentId, organizerId, outsiderOrganizerId, targetStudentId];
+    const eventIds = [event1Id, event2Id];
+    const clubIds = [club1Id, club2Id];
+
+    const cleanupTasks = [
+      {
+        name: 'Event registrations',
+        sql: `DELETE FROM public.event_registrations WHERE event_id IN ('${event1Id}', '${event2Id}') OR user_id IN (${userIds.map(id => `'${id}'`).join(',')});`
+      },
+      {
+        name: 'Events',
+        sql: `DELETE FROM public.events WHERE id IN ('${event1Id}', '${event2Id}');`
+      },
+      {
+        name: 'Club memberships',
+        sql: `DELETE FROM public.club_memberships WHERE club_id IN ('${club1Id}', '${club2Id}') OR user_id IN (${userIds.map(id => `'${id}'`).join(',')});`
+      },
+      {
+        name: 'Clubs',
+        sql: `DELETE FROM public.clubs WHERE id IN ('${club1Id}', '${club2Id}');`
+      },
+      {
+        name: 'Profiles',
+        sql: `DELETE FROM public.profiles WHERE id IN (${userIds.map(id => `'${id}'`).join(',')});`
+      },
+      {
+        name: 'Auth users',
+        sql: `DELETE FROM auth.users WHERE id IN (${userIds.map(id => `'${id}'`).join(',')});`
+      }
+    ];
+
+    for (const task of cleanupTasks) {
+      try {
+        await querySql(task.sql);
+      } catch (e) {
+        console.warn(`[Teardown Notice] Could not clean ${task.name}: ${e.message}`);
+      }
     }
+    console.log('[Teardown] Staging test fixtures cleaned up successfully.');
   }
 }
 

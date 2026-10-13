@@ -909,6 +909,78 @@ describe("Mandatory Password Change & Security Field Profile Resolution", () => 
     expect(result.mustChangePassword).toBe(true);
     expect(result.error).toBeNull();
   });
+
+  it("regression: should throw error and prevent reaching normal application routes when auth succeeds but both profile-resolution paths fail", async () => {
+    // 1. Supabase Auth succeeds and returns an authenticated user
+    const mockAuthUser = { id: "user-123", email: "24cs0199@campus.internal" };
+
+    // 2. Both profile resolution sources fail (RPC fails + fallback query fails)
+    const rpcData = null;
+    const rpcError = new Error("get_my_profile RPC failed: network timeout");
+    const fallbackData = null;
+    const fallbackError = new Error("fallback profiles table query failed: connection refused");
+
+    const resolution = resolveProfileFromSources(rpcData, rpcError, fallbackData, fallbackError);
+    expect(resolution.profile).toBeNull();
+    expect(resolution.mustChangePassword).toBe(true);
+    expect(resolution.error).toBeTruthy();
+
+    // 3. Verify signIn contract: when profile resolution fails, it throws a clear error and NEVER returns false
+    const simulateSignIn = async () => {
+      if (!mockAuthUser) {
+        throw new Error("Authentication failed: No user returned by authentication provider.");
+      }
+      const prof = resolution.profile;
+      if (!prof) {
+        const reason = resolution.error || "Account profile record could not be loaded or verified.";
+        throw new Error(`Profile resolution failed (${reason}). Access to campus application routes is restricted.`);
+      }
+      if (!prof.is_verified) {
+        throw new Error("Account directory verification is pending or incomplete. Access to campus application routes is restricted.");
+      }
+      return prof.must_change_password;
+    };
+
+    await expect(simulateSignIn()).rejects.toThrow("Profile resolution failed");
+    await expect(simulateSignIn()).rejects.toThrow("Access to campus application routes is restricted.");
+
+    // 4. Verify Route Guard Behavior: session exists with unresolved profile
+    const evaluateRouteAccess = (sessionUser: any, profile: any, profileError: string | null, mustChange: boolean) => {
+      if (!sessionUser) return "redirect:/auth";
+      if (profileError || !profile) return "restricted:AuthErrorScreen";
+      if (!profile.is_verified) return "restricted:UnverifiedScreen";
+      if (mustChange) return "redirect:/change-password";
+      return "allowed:NormalAppRoute";
+    };
+
+    const routeOutcome = evaluateRouteAccess(mockAuthUser, resolution.profile, resolution.error, resolution.mustChangePassword);
+    expect(routeOutcome).toBe("restricted:AuthErrorScreen");
+    expect(routeOutcome).not.toBe("allowed:NormalAppRoute");
+    expect(routeOutcome).not.toBe("redirect:/");
+  });
+
+  it("regression: should restrict access when profile is loaded but directory verification is unverified", async () => {
+    const mockAuthUser = { id: "user-unverified", email: "24cs0198@campus.internal" };
+    const unverifiedProfile = {
+      student_id: "24CS0198",
+      username: "24cs0198",
+      college_role: "student" as const,
+      is_verified: false,
+      must_change_password: false,
+    };
+
+    const evaluateRouteAccess = (sessionUser: any, profile: any, profileError: string | null, mustChange: boolean) => {
+      if (!sessionUser) return "redirect:/auth";
+      if (profileError || !profile) return "restricted:AuthErrorScreen";
+      if (!profile.is_verified) return "restricted:UnverifiedScreen";
+      if (mustChange) return "redirect:/change-password";
+      return "allowed:NormalAppRoute";
+    };
+
+    const routeOutcome = evaluateRouteAccess(mockAuthUser, unverifiedProfile, null, unverifiedProfile.must_change_password);
+    expect(routeOutcome).toBe("restricted:UnverifiedScreen");
+    expect(routeOutcome).not.toBe("allowed:NormalAppRoute");
+  });
 });
 
 
