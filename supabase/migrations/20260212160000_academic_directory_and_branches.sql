@@ -328,6 +328,8 @@ GRANT SELECT (
   updated_at
 ) ON public.profiles TO authenticated;
 
+GRANT INSERT ON public.profiles TO authenticated;
+
 -- Dedicated secure RPC for authenticated users to view their own full profile including student_id
 CREATE OR REPLACE FUNCTION public.get_my_profile()
 RETURNS TABLE (
