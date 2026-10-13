@@ -305,6 +305,12 @@ CREATE POLICY "Authenticated users view profiles" ON public.profiles
   FOR SELECT TO authenticated
   USING (true);
 
+DROP POLICY IF EXISTS "Admins manage all profiles" ON public.profiles;
+CREATE POLICY "Admins manage all profiles" ON public.profiles
+  FOR ALL TO authenticated
+  USING (public.is_college_admin(auth.uid()))
+  WITH CHECK (public.is_college_admin(auth.uid()));
+
 -- Privacy protection: Prevent direct reading of sensitive student roll numbers (student_id) across all profiles
 REVOKE ALL ON public.profiles FROM PUBLIC, anon;
 REVOKE SELECT ON public.profiles FROM authenticated, anon;
@@ -739,7 +745,7 @@ CREATE POLICY "Students view own directory record"
   FOR SELECT TO authenticated
   USING (
     profile_id = auth.uid() OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );
 
 -- Directory management restricted strictly to college administrators
@@ -747,8 +753,8 @@ DROP POLICY IF EXISTS "Admins can manage student directory" ON public.student_di
 CREATE POLICY "Admins can manage student directory"
   ON public.student_directory
   FOR ALL TO authenticated
-  USING (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin'))
-  WITH CHECK (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin'));
+  USING (public.is_college_admin(auth.uid()))
+  WITH CHECK (public.is_college_admin(auth.uid()));
 
 -- 12. DATABASE-LEVEL CONTENT AUDIENCE AND VISIBILITY RLS POLICIES
 -- Enforces college vs branch vs club_members visibility directly in PostgreSQL.
@@ -761,7 +767,7 @@ CREATE POLICY "Audience can view posts" ON public.posts
   FOR SELECT TO authenticated
   USING (
     user_id = auth.uid() OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin') OR
+    public.is_college_admin(auth.uid()) OR
     content_visibility = 'college' OR
     (content_visibility = 'branch' AND branch_id IS NOT NULL AND branch_id = (SELECT p.branch_id FROM public.profiles p WHERE p.id = auth.uid()))
   );
@@ -792,7 +798,7 @@ CREATE POLICY "Audience can view clubs" ON public.clubs
   FOR SELECT TO authenticated
   USING (
     created_by = auth.uid() OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin') OR
+    public.is_college_admin(auth.uid()) OR
     (status = 'active' AND (
       content_visibility = 'college' OR
       (content_visibility = 'branch' AND branch_id IS NOT NULL AND branch_id = (SELECT p.branch_id FROM public.profiles p WHERE p.id = auth.uid())) OR
@@ -813,7 +819,7 @@ CREATE POLICY "Audience can view channels" ON public.club_channels
       SELECT 1 FROM public.club_memberships cm
       WHERE cm.club_id = club_channels.club_id AND cm.user_id = auth.uid() AND cm.status = 'active'
     ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );
 
 -- E. CHANNEL MESSAGES AUDIENCE POLICY (ANNOUNCEMENTS & DISCUSSIONS)
@@ -824,7 +830,7 @@ CREATE POLICY "Audience can view channel messages" ON public.channel_messages
   FOR SELECT TO authenticated
   USING (
     sender_id = auth.uid() OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin') OR
+    public.is_college_admin(auth.uid()) OR
     -- Active club members can view messages in their club channels
     EXISTS (
       SELECT 1 FROM public.club_channels cc

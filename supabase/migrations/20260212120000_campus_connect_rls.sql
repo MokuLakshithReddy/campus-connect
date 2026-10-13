@@ -13,6 +13,21 @@ ALTER TABLE public.event_registrations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
 
 -- 2. HELPER FUNCTIONS FOR RLS (SECURITY DEFINER STABLE)
+CREATE OR REPLACE FUNCTION public.is_college_admin(p_user_id UUID DEFAULT auth.uid())
+RETURNS BOOLEAN AS $$
+BEGIN
+  IF p_user_id IS NULL THEN
+    RETURN FALSE;
+  END IF;
+
+  RETURN EXISTS (
+    SELECT 1 FROM public.profiles WHERE id = p_user_id AND college_role = 'college_admin'
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+
+GRANT EXECUTE ON FUNCTION public.is_college_admin(UUID) TO authenticated, anon, service_role, public;
+
 CREATE OR REPLACE FUNCTION public.is_club_organizer_or_admin(p_club_id UUID, p_user_id UUID)
 RETURNS BOOLEAN AS $$
 BEGIN
@@ -20,7 +35,7 @@ BEGIN
     RETURN FALSE;
   END IF;
 
-  IF EXISTS (SELECT 1 FROM public.profiles WHERE id = p_user_id AND college_role = 'college_admin') THEN
+  IF public.is_college_admin(p_user_id) THEN
     RETURN TRUE;
   END IF;
 
@@ -38,7 +53,7 @@ BEGIN
     RETURN FALSE;
   END IF;
 
-  IF EXISTS (SELECT 1 FROM public.profiles WHERE id = p_user_id AND college_role = 'college_admin') THEN
+  IF public.is_college_admin(p_user_id) THEN
     RETURN TRUE;
   END IF;
 
@@ -65,7 +80,8 @@ CREATE POLICY "Users can update own profile" ON public.profiles
 DROP POLICY IF EXISTS "Admins manage all profiles" ON public.profiles;
 CREATE POLICY "Admins manage all profiles" ON public.profiles
   FOR ALL TO authenticated
-  USING (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin'));
+  USING (public.is_college_admin(auth.uid()))
+  WITH CHECK (public.is_college_admin(auth.uid()));
 
 -- 4. CLUBS POLICIES
 DROP POLICY IF EXISTS "View active clubs or own proposals" ON public.clubs;
@@ -73,7 +89,7 @@ CREATE POLICY "View active clubs or own proposals" ON public.clubs
   FOR SELECT USING (
     status = 'active' OR
     created_by = auth.uid() OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );
 
 DROP POLICY IF EXISTS "Auth users submit club proposal" ON public.clubs;
@@ -92,7 +108,7 @@ DROP POLICY IF EXISTS "Admins delete clubs" ON public.clubs;
 CREATE POLICY "Admins delete clubs" ON public.clubs
   FOR DELETE TO authenticated
   USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );
 
 -- 5. CLUB MEMBERSHIPS POLICIES
@@ -118,7 +134,7 @@ DROP POLICY IF EXISTS "Admins insert membership" ON public.club_memberships;
 CREATE POLICY "Admins insert membership" ON public.club_memberships
   FOR INSERT TO authenticated
   WITH CHECK (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );
 
 DROP POLICY IF EXISTS "Organizers or admins update membership" ON public.club_memberships;
@@ -145,7 +161,7 @@ CREATE POLICY "Active members view channels" ON public.club_channels
       SELECT 1 FROM public.club_memberships cm
       WHERE cm.club_id = club_channels.club_id AND cm.user_id = auth.uid() AND cm.status = 'active'
     ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );
 
 DROP POLICY IF EXISTS "Organizers create channels" ON public.club_channels;
@@ -179,7 +195,7 @@ CREATE POLICY "Active members view messages" ON public.channel_messages
       JOIN public.club_memberships cm ON cm.club_id = cc.club_id
       WHERE cc.id = channel_messages.channel_id AND cm.user_id = auth.uid() AND cm.status = 'active'
     ) OR
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );
 
 DROP POLICY IF EXISTS "Active members send messages" ON public.channel_messages;
@@ -194,7 +210,7 @@ CREATE POLICY "Active members send messages" ON public.channel_messages
         WHERE cc.id = channel_messages.channel_id AND cm.user_id = auth.uid() AND cm.status = 'active'
         AND (cc.type != 'announcements' OR cm.role IN ('president', 'organizer'))
       ) OR
-      EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+      public.is_college_admin(auth.uid())
     )
   );
 
@@ -300,5 +316,5 @@ DROP POLICY IF EXISTS "Admins insert notifications" ON public.notifications;
 CREATE POLICY "Admins insert notifications" ON public.notifications
   FOR INSERT TO authenticated
   WITH CHECK (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+    public.is_college_admin(auth.uid())
   );

@@ -66,7 +66,7 @@ CREATE POLICY "Users delete own avatar" ON storage.objects
     bucket_id = 'avatars' AND
     (
       (storage.foldername(name))[1] = auth.uid()::text OR
-      EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+      public.is_college_admin(auth.uid())
     )
   );
 
@@ -105,6 +105,6 @@ CREATE POLICY "Users delete own post media" ON storage.objects
     bucket_id = 'posts' AND
     (
       (storage.foldername(name))[1] = auth.uid()::text OR
-      EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND college_role = 'college_admin')
+      public.is_college_admin(auth.uid())
     )
   );

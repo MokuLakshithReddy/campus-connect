@@ -349,8 +349,13 @@ async function runSecurityTestSuite(client, testContextName) {
         await client.query(`UPDATE public.profiles SET student_id = '25MVCSMR0099' WHERE id = '${user1Id}';`);
       });
     } catch (err) {
-      if (err.message.includes('Student roll number cannot be modified') || err.message.includes('permission denied')) {
+      if (err.message.includes('Student roll number cannot be modified') ||
+          err.message.includes('Verified student roll number cannot be modified') ||
+          err.message.includes('permission denied') ||
+          err.message.includes('Unauthorized')) {
         tamperingBlocked = true;
+      } else {
+        throw err;
       }
     }
     if (tamperingBlocked) {
@@ -369,8 +374,13 @@ async function runSecurityTestSuite(client, testContextName) {
         await client.query(`UPDATE public.profiles SET college_role = 'college_admin' WHERE id = '${user1Id}';`);
       });
     } catch (err) {
-      if (err.message.includes('College role cannot be self-modified') || err.message.includes('permission denied')) {
+      if (err.message.includes('College role cannot be self-modified') ||
+          err.message.includes('Only college admins can modify college roles') ||
+          err.message.includes('permission denied') ||
+          err.message.includes('Unauthorized')) {
         escalationBlocked = true;
+      } else {
+        throw err;
       }
     }
     if (escalationBlocked) {
@@ -430,6 +440,8 @@ async function runSecurityTestSuite(client, testContextName) {
     } catch (err) {
       if (err.message.includes('Supplied branch_id does not match') || err.message.includes('Unauthorized')) {
         spoofBlockedOnInsert = true;
+      } else {
+        throw err;
       }
     }
     if (spoofBlockedOnInsert) {
@@ -458,6 +470,8 @@ async function runSecurityTestSuite(client, testContextName) {
     } catch (err) {
       if (err.message.includes('cannot be modified by non-administrators') || err.message.includes('Unauthorized')) {
         spoofBlockedOnUpdate = true;
+      } else {
+        throw err;
       }
     }
     if (spoofBlockedOnUpdate) {
@@ -483,6 +497,8 @@ async function runSecurityTestSuite(client, testContextName) {
     } catch (err) {
       if (err.message.includes('permission denied') || err.message.includes('academic status can only be modified') || err.message.includes('Unauthorized')) {
         directVerifyBlocked = true;
+      } else {
+        throw err;
       }
     }
 
@@ -495,6 +511,8 @@ async function runSecurityTestSuite(client, testContextName) {
     } catch (err) {
       if (err.message.includes('permission denied') || err.message.includes('academic status can only be modified') || err.message.includes('Unauthorized')) {
         branchTamperBlocked = true;
+      } else {
+        throw err;
       }
     }
 
