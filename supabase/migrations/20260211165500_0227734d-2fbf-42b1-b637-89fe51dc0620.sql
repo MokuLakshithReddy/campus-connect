@@ -1,6 +1,5 @@
-
 -- Create conversations table
-CREATE TABLE public.conversations (
+CREATE TABLE IF NOT EXISTS public.conversations (
   id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
   user1_id UUID NOT NULL,
   user2_id UUID NOT NULL,
@@ -10,7 +9,7 @@ CREATE TABLE public.conversations (
 );
 
 -- Create messages table
-CREATE TABLE public.messages (
+CREATE TABLE IF NOT EXISTS public.messages (
   id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
   conversation_id UUID NOT NULL REFERENCES public.conversations(id) ON DELETE CASCADE,
   sender_id UUID NOT NULL,
@@ -23,19 +22,23 @@ ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
 -- Conversation policies
+DROP POLICY IF EXISTS "Users can view own conversations" ON public.conversations;
 CREATE POLICY "Users can view own conversations"
   ON public.conversations FOR SELECT
   USING (auth.uid() = user1_id OR auth.uid() = user2_id);
 
+DROP POLICY IF EXISTS "Auth users can create conversations" ON public.conversations;
 CREATE POLICY "Auth users can create conversations"
   ON public.conversations FOR INSERT
   WITH CHECK (auth.uid() = user1_id OR auth.uid() = user2_id);
 
+DROP POLICY IF EXISTS "Users can update own conversations" ON public.conversations;
 CREATE POLICY "Users can update own conversations"
   ON public.conversations FOR UPDATE
   USING (auth.uid() = user1_id OR auth.uid() = user2_id);
 
 -- Message policies
+DROP POLICY IF EXISTS "Users can view messages in their conversations" ON public.messages;
 CREATE POLICY "Users can view messages in their conversations"
   ON public.messages FOR SELECT
   USING (
@@ -46,6 +49,7 @@ CREATE POLICY "Users can view messages in their conversations"
     )
   );
 
+DROP POLICY IF EXISTS "Users can send messages in their conversations" ON public.messages;
 CREATE POLICY "Users can send messages in their conversations"
   ON public.messages FOR INSERT
   WITH CHECK (
@@ -70,5 +74,5 @@ BEGIN
 END $$;
 
 -- Index for performance
-CREATE INDEX idx_messages_conversation_id ON public.messages(conversation_id);
-CREATE INDEX idx_conversations_users ON public.conversations(user1_id, user2_id);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON public.messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_users ON public.conversations(user1_id, user2_id);

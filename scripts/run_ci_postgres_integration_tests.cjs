@@ -135,8 +135,25 @@ async function bootstrapEnvironment(client) {
       );
     $$;
   `);
+  await client.query(`
+    CREATE OR REPLACE FUNCTION auth.role() RETURNS TEXT LANGUAGE sql STABLE AS $$
+      SELECT COALESCE(
+        nullif(pg_catalog.current_setting('request.jwt.claim.role', true), ''),
+        (nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')
+      )::text;
+    $$;
+  `);
+  await client.query(`
+    CREATE OR REPLACE FUNCTION auth.email() RETURNS TEXT LANGUAGE sql STABLE AS $$
+      SELECT COALESCE(
+        nullif(pg_catalog.current_setting('request.jwt.claim.email', true), ''),
+        (nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'email')
+      )::text;
+    $$;
+  `);
   await client.query(`GRANT USAGE ON SCHEMA auth TO authenticated, anon;`);
   await client.query(`GRANT SELECT ON auth.users TO authenticated, anon;`);
+  await client.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO postgres, authenticated, anon, service_role, public;`);
 
   // Step 6: Bootstrap mock storage schema
   await client.query(`CREATE SCHEMA IF NOT EXISTS storage;`);

@@ -559,6 +559,7 @@ BEGIN
 
   RETURN pg_catalog.jsonb_build_object(
     'linked', true,
+    'verified', true,
     'roll_number', v_dir.roll_number,
     'branch_id', v_dir.branch_id,
     'course', v_branch.course,
