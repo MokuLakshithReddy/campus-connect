@@ -1586,8 +1586,12 @@ CREATE INDEX IF NOT EXISTS idx_student_directory_active_branch
   ON public.student_directory(branch_id, is_active);
 
 CREATE INDEX IF NOT EXISTS idx_student_directory_profile
-  ON public.student_directory(profile_id);ALTER TABLE public.profiles
-  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id);
+  ON public.student_directory(profile_id);
+
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS branch_id UUID REFERENCES public.academic_branches(id),
+  ADD COLUMN IF NOT EXISTS activation_expires_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_profiles_branch_id
   ON public.profiles(branch_id);
