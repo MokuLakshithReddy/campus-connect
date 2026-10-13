@@ -44,7 +44,7 @@ const Events = () => {
     try {
       setLoading(true);
 
-      // Fetch events with club info
+      // Fetch published public events with club info
       const { data: evData, error: evErr } = await supabase
         .from("events")
         .select(`
@@ -54,6 +54,7 @@ const Events = () => {
             category
           )
         `)
+        .eq("is_published", true)
         .order("start_time", { ascending: true });
 
       if (evErr) throw evErr;

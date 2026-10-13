@@ -1,26 +1,57 @@
 -- Seed script for CampusConnect (College Clubs, Channels, Events, Registrations)
 
--- 1. Update profiles with college student details
-UPDATE public.profiles
-SET department = 'Computer Science & Engineering',
-    year = '3rd Year',
-    student_id = '22CSE0142',
-    is_verified = true
-WHERE id = '73195cf7-df24-49e8-9f09-07bf6eb81c11';
+-- 1. Official Student Directory Roster Seeding (Confirmed 2025 Cohorts)
+DO $$
+DECLARE
+  v_aiml_branch UUID;
+  v_cse_branch UUID;
+BEGIN
+  SELECT id INTO v_aiml_branch FROM public.academic_branches WHERE course = 'B.Tech' AND branch_code = 'CSE-AIML';
+  SELECT id INTO v_cse_branch FROM public.academic_branches WHERE course = 'B.Tech' AND branch_code = 'CSE';
 
-UPDATE public.profiles
-SET department = 'Electronics & Communication',
-    year = '3rd Year',
-    student_id = '22ECE0089',
-    is_verified = true
-WHERE id = 'a8817ef0-18c9-4ab8-9d07-a027caa4eba2';
+  -- Seed verified roster records for official cohorts (25MVCSMR and 25MVCSER prefixes)
+  INSERT INTO public.student_directory (roll_number, branch_id, admission_year, is_active, profile_id)
+  VALUES
+    ('25MVCSMR0001', v_aiml_branch, 2025, true, '73195cf7-df24-49e8-9f09-07bf6eb81c11'),
+    ('25MVCSMR0002', v_aiml_branch, 2025, true, '39b1d5b2-eabc-4bf3-ad7a-0af0b303114d'),
+    ('25MVCSMR0003', v_aiml_branch, 2025, true, NULL),
+    ('25MVCSMR0004', v_aiml_branch, 2025, true, NULL),
+    ('25MVCSER0001', v_cse_branch, 2025, true, 'a8817ef0-18c9-4ab8-9d07-a027caa4eba2'),
+    ('25MVCSER0002', v_cse_branch, 2025, true, NULL),
+    ('25MVCSER0003', v_cse_branch, 2025, true, NULL)
+  ON CONFLICT (roll_number) DO UPDATE SET
+    branch_id = EXCLUDED.branch_id,
+    admission_year = EXCLUDED.admission_year,
+    is_active = EXCLUDED.is_active;
 
-UPDATE public.profiles
-SET department = 'Mechanical Engineering',
-    year = '4th Year',
-    student_id = '21ME0034',
-    is_verified = true
-WHERE id = '39b1d5b2-eabc-4bf3-ad7a-0af0b303114d';
+  -- Synchronize seed profile records with their official branches and roll numbers
+  UPDATE public.profiles
+  SET department = 'Computer Science & Engineering (AI & ML)',
+      year = '1st Year',
+      student_id = '25MVCSMR0001',
+      branch_id = v_aiml_branch,
+      branch_name = 'B.Tech Computer Science and Engineering (AI & ML)',
+      is_verified = true
+  WHERE id = '73195cf7-df24-49e8-9f09-07bf6eb81c11';
+
+  UPDATE public.profiles
+  SET department = 'Computer Science & Engineering',
+      year = '1st Year',
+      student_id = '25MVCSER0001',
+      branch_id = v_cse_branch,
+      branch_name = 'B.Tech Computer Science and Engineering',
+      is_verified = true
+  WHERE id = 'a8817ef0-18c9-4ab8-9d07-a027caa4eba2';
+
+  UPDATE public.profiles
+  SET department = 'Computer Science & Engineering (AI & ML)',
+      year = '1st Year',
+      student_id = '25MVCSMR0002',
+      branch_id = v_aiml_branch,
+      branch_name = 'B.Tech Computer Science and Engineering (AI & ML)',
+      is_verified = true
+  WHERE id = '39b1d5b2-eabc-4bf3-ad7a-0af0b303114d';
+END $$;
 
 -- 2. Insert Clubs
 INSERT INTO public.clubs (id, name, slug, description, category, faculty_coordinator, status, created_by)

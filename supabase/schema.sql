@@ -1760,7 +1760,8 @@ SELECT
   created_at
 FROM public.profiles;
 
-GRANT SELECT ON public.public_profiles TO authenticated, anon;
+REVOKE ALL ON public.public_profiles FROM PUBLIC, anon;
+GRANT SELECT ON public.public_profiles TO authenticated;
 
 -- 7. SEED ACADEMIC BRANCHES & CONFIRMED PREFIXES
 DO $$
@@ -1960,6 +1961,10 @@ DECLARE
   v_caller_branch_id UUID;
   v_effective_branch_id UUID;
   v_sanitized TEXT := pg_catalog.btrim(COALESCE(p_query, ''));
+  -- Escape SQL wildcards (%, _, \) to prevent query expansion attacks
+  v_escaped TEXT := pg_catalog.replace(pg_catalog.replace(pg_catalog.replace(v_sanitized, '\', '\\'), '%', '\%'), '_', '\_');
+  -- Measure alphanumeric content length excluding wildcards and spaces
+  v_clean_len INT := pg_catalog.length(pg_catalog.regexp_replace(v_sanitized, '[%_\\s\\]', '', 'g'));
   v_effective_limit INT;
   v_effective_offset INT;
 BEGIN
@@ -1983,26 +1988,27 @@ BEGIN
   ELSE
     -- For ordinary students:
     IF p_branch_id IS NULL THEN
-      -- Default to caller's verified branch if query is short
-      IF pg_catalog.length(v_sanitized) < 3 THEN
+      -- Default to caller's verified branch if non-wildcard query is short
+      IF v_clean_len < 3 THEN
         v_effective_branch_id := v_caller_branch_id;
       ELSE
-        -- If query >= 3 characters, allow targeted cross-college discovery
+        -- If query >= 3 non-wildcard characters, allow targeted cross-college discovery
         v_effective_branch_id := NULL;
       END IF;
     ELSIF p_branch_id = v_caller_branch_id THEN
       v_effective_branch_id := v_caller_branch_id;
     ELSE
-      -- Specific other branch selected: require query length >= 3 to prevent broad enumeration
-      IF pg_catalog.length(v_sanitized) < 3 THEN
+      -- Specific other branch selected: require non-wildcard query length >= 3 to prevent broad enumeration
+      IF v_clean_len < 3 THEN
         RAISE EXCEPTION 'Cross-branch search requires at least 3 search characters';
       END IF;
       v_effective_branch_id := p_branch_id;
     END IF;
   END IF;
 
-  v_effective_limit := LEAST(GREATEST(COALESCE(p_limit, 20), 1), 20);
-  v_effective_offset := GREATEST(COALESCE(p_offset, 0), 0);
+  -- Bound limit and offset to prevent unbounded database scraping
+  v_effective_limit := LEAST(GREATEST(COALESCE(p_limit, 20), 1), 50);
+  v_effective_offset := LEAST(GREATEST(COALESCE(p_offset, 0), 0), 200);
 
   RETURN QUERY
   SELECT 
@@ -2025,9 +2031,9 @@ BEGIN
     AND p.college_role = 'student'
     AND (
       v_sanitized = '' OR
-      p.username ILIKE ('%' || v_sanitized || '%') OR
-      p.student_id ILIKE ('%' || v_sanitized || '%') OR
-      p.department ILIKE ('%' || v_sanitized || '%')
+      p.username ILIKE ('%' || v_escaped || '%') ESCAPE '\' OR
+      p.student_id ILIKE ('%' || v_escaped || '%') ESCAPE '\' OR
+      p.department ILIKE ('%' || v_escaped || '%') ESCAPE '\'
     )
     AND (v_effective_branch_id IS NULL OR p.branch_id = v_effective_branch_id)
   ORDER BY p.username ASC
@@ -2038,6 +2044,32 @@ $$;
 
 REVOKE ALL ON FUNCTION public.search_campus_students(TEXT, UUID, INT, INT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.search_campus_students(TEXT, UUID, INT, INT) TO authenticated;
+
+-- 10.B. RPC: GET CLUB MEMBER STATS (AGGREGATE WITHOUT EXPOSING FULL ROSTERS)
+CREATE OR REPLACE FUNCTION public.get_club_member_stats(p_club_ids UUID[])
+RETURNS TABLE (
+  club_id UUID,
+  member_count BIGINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    cm.club_id,
+    pg_catalog.count(*)::BIGINT AS member_count
+  FROM public.club_memberships cm
+  WHERE cm.club_id = ANY(p_club_ids)
+    AND cm.status = 'active'
+  GROUP BY cm.club_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_club_member_stats(UUID[]) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_club_member_stats(UUID[]) TO authenticated;
 
 -- 11. STRICT ROW LEVEL SECURITY FOR REGISTRIES
 ALTER TABLE public.academic_branches ENABLE ROW LEVEL SECURITY;

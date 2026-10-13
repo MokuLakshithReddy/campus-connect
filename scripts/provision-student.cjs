@@ -85,21 +85,27 @@ async function verifyDirectoryRecord(roll) {
 async function provisionStudent() {
   console.log(`[Provisioning] Validating student roll number ${rollNumber}...`);
 
-  // 1. Verify existence in student directory
+  // 1. Verify existence in student directory - mandatory prerequisite for provisioning
+  let dirEntry = null;
   try {
-    const dirEntry = await verifyDirectoryRecord(rollNumber);
-    if (dirEntry) {
-      if (dirEntry.is_active === false) {
-        console.error(`ERROR: Student directory record for ${rollNumber} is marked inactive.`);
-        process.exit(1);
-      }
-      console.log(`- Verified against official student directory: active record found`);
-    } else {
-      console.log(`- Notice: Direct student directory record not found via REST (will proceed if directory entry was pre-seeded)`);
-    }
+    dirEntry = await verifyDirectoryRecord(rollNumber);
   } catch (err) {
-    console.warn(`- Warning verifying directory: ${err.message}`);
+    console.error(`ERROR: Failed to query student directory: ${err.message}`);
+    process.exit(1);
   }
+
+  if (!dirEntry) {
+    console.error(`ERROR: Cannot provision student ${rollNumber}. No active record found in the official student roster (public.student_directory).`);
+    console.error(`Before creating an account, the student must be enrolled in student_directory by campus administration.`);
+    process.exit(1);
+  }
+
+  if (dirEntry.is_active === false) {
+    console.error(`ERROR: Cannot provision student ${rollNumber}. The student directory record is marked inactive.`);
+    process.exit(1);
+  }
+
+  console.log(`- Verified against official student directory: active record found (Branch ID: ${dirEntry.branch_id}, Year: ${dirEntry.admission_year})`);
 
   console.log(`[Provisioning] Creating account in auth.users...`);
   console.log(`- Identifier: ${rollNumber}`);

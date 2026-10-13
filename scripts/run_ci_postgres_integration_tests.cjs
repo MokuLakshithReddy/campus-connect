@@ -61,21 +61,8 @@ async function withAuthenticatedSession(client, userId, callback) {
 }
 
 async function bootstrapEnvironment(client) {
+  // Step 1: Create standard Supabase roles if they do not exist
   await client.query(`
-    CREATE SCHEMA IF NOT EXISTS extensions;
-    GRANT USAGE ON SCHEMA extensions TO postgres, authenticated, anon, service_role, public;
-
-    DO $$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto') THEN
-        CREATE EXTENSION pgcrypto WITH SCHEMA public;
-      END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp') THEN
-        CREATE EXTENSION "uuid-ossp" WITH SCHEMA public;
-      END IF;
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END $$;
-
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
@@ -89,8 +76,22 @@ async function bootstrapEnvironment(client) {
       END IF;
     END
     $$;
+  `);
 
-    -- Bootstrap Supabase Realtime Publication if not already present
+  // Step 2: Create extensions schema and grant access
+  await client.query(`
+    CREATE SCHEMA IF NOT EXISTS extensions;
+    GRANT USAGE ON SCHEMA extensions TO postgres, authenticated, anon, service_role, public;
+  `);
+
+  // Step 3: Ensure essential cryptographic extensions exist in public schema
+  await client.query(`
+    CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
+  `);
+
+  // Step 4: Bootstrap Supabase Realtime Publication if not already present
+  await client.query(`
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
@@ -98,9 +99,12 @@ async function bootstrapEnvironment(client) {
       END IF;
     END
     $$;
+  `);
 
-    CREATE SCHEMA IF NOT EXISTS auth;
 
+  // Step 5: Bootstrap auth schema and users table
+  await client.query(`CREATE SCHEMA IF NOT EXISTS auth;`);
+  await client.query(`
     CREATE TABLE IF NOT EXISTS auth.users (
       instance_id UUID,
       id UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -114,27 +118,29 @@ async function bootstrapEnvironment(client) {
       created_at TIMESTAMPTZ DEFAULT now(),
       updated_at TIMESTAMPTZ DEFAULT now()
     );
-
+  `);
+  await client.query(`
     CREATE OR REPLACE FUNCTION auth.uid() RETURNS UUID LANGUAGE sql STABLE AS $$
       SELECT COALESCE(
         nullif(pg_catalog.current_setting('request.jwt.claim.sub', true), ''),
         (nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
       )::uuid;
     $$;
-
+  `);
+  await client.query(`
     CREATE OR REPLACE FUNCTION auth.jwt() RETURNS JSONB LANGUAGE sql STABLE AS $$
       SELECT COALESCE(
         nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb,
         '{}'::jsonb
       );
     $$;
+  `);
+  await client.query(`GRANT USAGE ON SCHEMA auth TO authenticated, anon;`);
+  await client.query(`GRANT SELECT ON auth.users TO authenticated, anon;`);
 
-    GRANT USAGE ON SCHEMA auth TO authenticated, anon;
-    GRANT SELECT ON auth.users TO authenticated, anon;
-
-    -- Bootstrap Mock Storage Schema for clean PostgreSQL testing
-    CREATE SCHEMA IF NOT EXISTS storage;
-
+  // Step 6: Bootstrap mock storage schema
+  await client.query(`CREATE SCHEMA IF NOT EXISTS storage;`);
+  await client.query(`
     CREATE TABLE IF NOT EXISTS storage.buckets (
       id text PRIMARY KEY,
       name text NOT NULL,
@@ -147,7 +153,8 @@ async function bootstrapEnvironment(client) {
       allowed_mime_types text[],
       owner_id text
     );
-
+  `);
+  await client.query(`
     CREATE TABLE IF NOT EXISTS storage.objects (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       bucket_id text REFERENCES storage.buckets(id),
@@ -159,33 +166,31 @@ async function bootstrapEnvironment(client) {
       metadata jsonb,
       path_tokens text[] GENERATED ALWAYS AS (string_to_array(name, '/')) STORED
     );
-    ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
-
+  `);
+  await client.query(`ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;`);
+  await client.query(`
     CREATE OR REPLACE FUNCTION storage.foldername(name text)
     RETURNS text[] LANGUAGE plpgsql AS $$
-    DECLARE
-      _parts text[];
+    DECLARE _parts text[];
     BEGIN
       _parts := string_to_array(name, '/');
       RETURN _parts[1:array_length(_parts, 1) - 1];
     END;
     $$;
-
+  `);
+  await client.query(`
     CREATE OR REPLACE FUNCTION storage.extension(name text)
     RETURNS text LANGUAGE plpgsql AS $$
-    DECLARE
-      _parts text[];
-      _filename text;
+    DECLARE _parts text[]; _filename text;
     BEGIN
       _parts := string_to_array(name, '/');
       _filename := _parts[array_length(_parts, 1)];
       RETURN split_part(_filename, '.', 2);
     END;
     $$;
-
-    GRANT USAGE ON SCHEMA storage TO authenticated, anon;
-    GRANT ALL ON ALL TABLES IN SCHEMA storage TO authenticated, anon;
   `);
+  await client.query(`GRANT USAGE ON SCHEMA storage TO authenticated, anon;`);
+  await client.query(`GRANT ALL ON ALL TABLES IN SCHEMA storage TO authenticated, anon;`);
 }
 
 async function resetPublicSchema(client) {
@@ -194,22 +199,10 @@ async function resetPublicSchema(client) {
     CREATE SCHEMA public;
     GRANT ALL ON SCHEMA public TO postgres;
     GRANT USAGE, CREATE ON SCHEMA public TO public;
-    DO $$
-    BEGIN
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-        GRANT USAGE, CREATE ON SCHEMA public TO authenticated;
-      END IF;
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
-        GRANT USAGE, CREATE ON SCHEMA public TO anon;
-      END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto') THEN
-        CREATE EXTENSION pgcrypto WITH SCHEMA public;
-      END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp') THEN
-        CREATE EXTENSION "uuid-ossp" WITH SCHEMA public;
-      END IF;
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END $$;
+    GRANT USAGE, CREATE ON SCHEMA public TO authenticated;
+    GRANT USAGE, CREATE ON SCHEMA public TO anon;
+    CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
   `);
 }
 
@@ -551,12 +544,35 @@ async function runSecurityTestSuite(client, testContextName) {
       return await client.query(`SELECT * FROM public.search_campus_students('', NULL, 5);`);
     });
     const foundUser1 = ownBranchSearch.rows.find(r => r.id === user1Id);
-    if (foundUser1 && foundUser1.student_id.startsWith('****') && foundUser1.student_id.endsWith(testRoll.slice(-4))) {
-      console.log('PASSED (Unverified blocked, cross-branch scraping blocked, own branch masked)');
-      passed++;
-    } else {
+    if (!foundUser1 || !foundUser1.student_id.startsWith('****') || !foundUser1.student_id.endsWith(testRoll.slice(-4))) {
       throw new Error(`Search student check failed: ${JSON.stringify(ownBranchSearch.rows)}`);
     }
+
+    // D. Wildcard-only query (%%%) must be blocked from cross-branch searches
+    let wildcardCrossBranchBlocked = false;
+    try {
+      await withAuthenticatedSession(client, user1Id, async () => {
+        await client.query(`SELECT * FROM public.search_campus_students('%%%', '${cseBranchId}', 5);`);
+      });
+    } catch (err) {
+      if (err.message.includes('Cross-branch search requires at least 3') || err.message.includes('Access restricted')) {
+        wildcardCrossBranchBlocked = true;
+      }
+    }
+    if (!wildcardCrossBranchBlocked) {
+      throw new Error('Wildcard search (%%%) bypassed minimum character length check!');
+    }
+
+    // E. Wildcard query in own branch searches literally for %%% and does not match all users
+    const wildcardOwnBranch = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT * FROM public.search_campus_students('%%%', NULL, 20);`);
+    });
+    if (wildcardOwnBranch.rows.length !== 0) {
+      throw new Error('Wildcard search (%%%) expanded unexpectedly and matched profiles!');
+    }
+
+    console.log('PASSED (Unverified blocked, cross-branch scraping blocked, own branch masked, wildcards sanitized)');
+    passed++;
 
     // TEST 12: Database-Level Audience RLS Policies on Posts
     total++;
@@ -682,10 +698,8 @@ async function runSecurityTestSuite(client, testContextName) {
                                  !user2EventIds.includes(memberEventId);
 
     // Clean up test events and club
-    await client.query(`
-      DELETE FROM public.events WHERE id IN ('${collegeEventId}', '${branchEventId}', '${memberEventId}');
-      DELETE FROM public.clubs WHERE id = '${testClubId}';
-    `);
+    await client.query(`DELETE FROM public.events WHERE id IN ('${collegeEventId}', '${branchEventId}', '${memberEventId}');`);
+    await client.query(`DELETE FROM public.clubs WHERE id = '${testClubId}';`);
 
     if (user2IsolationPassed) {
       console.log('PASSED (College event visible to all; branch & club_members events restricted by database RLS)');
@@ -775,11 +789,24 @@ async function runSecurityTestSuite(client, testContextName) {
       }
     }
 
-    if (joinPrivacyDenied && (anonSeesZero || anonAccessDenied)) {
-      console.log('PASSED (Join queries to student_id denied; anonymous access blocked from profiles table)');
+    // Anonymous query to public.public_profiles view must also be denied
+    let anonPublicProfilesDenied = false;
+    try {
+      await client.query(`BEGIN; SET LOCAL ROLE anon;`);
+      await client.query(`SELECT count(*) FROM public.public_profiles;`);
+      await client.query(`COMMIT;`);
+    } catch (err) {
+      await client.query(`ROLLBACK;`).catch(() => {});
+      if (err.message.includes('permission denied for table public_profiles') || err.message.includes('permission denied for view public_profiles') || err.message.includes('permission denied') || err.message.includes('42501')) {
+        anonPublicProfilesDenied = true;
+      }
+    }
+
+    if (joinPrivacyDenied && (anonSeesZero || anonAccessDenied) && anonPublicProfilesDenied) {
+      console.log('PASSED (Join queries to student_id denied; anonymous access blocked from profiles table and public_profiles view)');
       passed++;
     } else {
-      throw new Error(`Join/anon privacy failed: joinDenied=${joinPrivacyDenied}, anonSeesZero=${anonSeesZero}, anonDenied=${anonAccessDenied}`);
+      throw new Error(`Join/anon privacy failed: joinDenied=${joinPrivacyDenied}, anonSeesZero=${anonSeesZero}, anonDenied=${anonAccessDenied}, anonPublicProfilesDenied=${anonPublicProfilesDenied}`);
     }
 
     // TEST 19: Channel Messages Audience and Membership Isolation
@@ -794,28 +821,11 @@ async function runSecurityTestSuite(client, testContextName) {
     const annMsgId = crypto.randomUUID();
 
     // Setup club, channels, and users
-    await client.query(`
-      INSERT INTO auth.users (id, email) VALUES 
-        ('${pendingUserId}', 'pending@campus.internal'),
-        ('${rejectedUserId}', 'rejected@campus.internal');
-      INSERT INTO public.clubs (id, name, slug, category, status, content_visibility, created_by, branch_id)
-      VALUES ('${msgClubId}', 'Msg Test Club ${msgClubId.slice(0, 6)}', 'msg-club-${msgClubId.slice(0, 8)}', 'Technical', 'active', 'college', '${user1Id}', '${aimlBranchId}');
-      
-      INSERT INTO public.club_channels (id, club_id, name, type) VALUES
-        ('${genChannelId}', '${msgClubId}', 'general', 'general'),
-        ('${annChannelId}', '${msgClubId}', 'announcements', 'announcements');
-
-      -- User 1 is active member; pendingUserId is pending; rejectedUserId is rejected
-      INSERT INTO public.club_memberships (club_id, user_id, role, status) VALUES
-        ('${msgClubId}', '${user1Id}', 'member', 'active'),
-        ('${msgClubId}', '${pendingUserId}', 'member', 'pending'),
-        ('${msgClubId}', '${rejectedUserId}', 'member', 'rejected');
-
-      -- Post messages
-      INSERT INTO public.channel_messages (id, channel_id, sender_id, content, content_visibility, branch_id) VALUES
-        ('${genMsgId}', '${genChannelId}', '${user1Id}', 'Secret internal discussion', 'club_members', NULL),
-        ('${annMsgId}', '${annChannelId}', '${user1Id}', 'Public campus announcement', 'college', NULL);
-    `);
+    await client.query(`INSERT INTO auth.users (id, email) VALUES ('${pendingUserId}', 'pending@campus.internal'), ('${rejectedUserId}', 'rejected@campus.internal');`);
+    await client.query(`INSERT INTO public.clubs (id, name, slug, category, status, content_visibility, created_by, branch_id) VALUES ('${msgClubId}', 'Msg Test Club ${msgClubId.slice(0, 6)}', 'msg-club-${msgClubId.slice(0, 8)}', 'Technical', 'active', 'college', '${user1Id}', '${aimlBranchId}');`);
+    await client.query(`INSERT INTO public.club_channels (id, club_id, name, type) VALUES ('${genChannelId}', '${msgClubId}', 'general', 'general'), ('${annChannelId}', '${msgClubId}', 'announcements', 'announcements');`);
+    await client.query(`INSERT INTO public.club_memberships (club_id, user_id, role, status) VALUES ('${msgClubId}', '${user1Id}', 'member', 'active'), ('${msgClubId}', '${pendingUserId}', 'member', 'pending'), ('${msgClubId}', '${rejectedUserId}', 'member', 'rejected');`);
+    await client.query(`INSERT INTO public.channel_messages (id, channel_id, sender_id, content, content_visibility, branch_id) VALUES ('${genMsgId}', '${genChannelId}', '${user1Id}', 'Secret internal discussion', 'club_members', NULL), ('${annMsgId}', '${annChannelId}', '${user1Id}', 'Public campus announcement', 'college', NULL);`);
 
     // Active member queries general message
     const user1GenMsgs = await withAuthenticatedSession(client, user1Id, async () => {
@@ -849,13 +859,11 @@ async function runSecurityTestSuite(client, testContextName) {
                                    user2AnnMsgs.rows.length === 1;
 
     // Cleanup channel test fixtures
-    await client.query(`
-      DELETE FROM public.channel_messages WHERE id IN ('${genMsgId}', '${annMsgId}');
-      DELETE FROM public.club_channels WHERE id IN ('${genChannelId}', '${annChannelId}');
-      DELETE FROM public.club_memberships WHERE club_id = '${msgClubId}';
-      DELETE FROM public.clubs WHERE id = '${msgClubId}';
-      DELETE FROM auth.users WHERE id IN ('${pendingUserId}', '${rejectedUserId}');
-    `);
+    await client.query(`DELETE FROM public.channel_messages WHERE id IN ('${genMsgId}', '${annMsgId}');`);
+    await client.query(`DELETE FROM public.club_channels WHERE id IN ('${genChannelId}', '${annChannelId}');`);
+    await client.query(`DELETE FROM public.club_memberships WHERE club_id = '${msgClubId}';`);
+    await client.query(`DELETE FROM public.clubs WHERE id = '${msgClubId}';`);
+    await client.query(`DELETE FROM auth.users WHERE id IN ('${pendingUserId}', '${rejectedUserId}');`);
 
     if (channelIsolationPassed) {
       console.log('PASSED (Active members see discussions; pending/rejected/non-members blocked; public announcements accessible)');
@@ -863,6 +871,76 @@ async function runSecurityTestSuite(client, testContextName) {
     } else {
       throw new Error(`Channel message isolation failed: user1=${user1GenMsgs.rows.length}, pending=${pendingGenMsgs.rows.length}, rejected=${rejectedGenMsgs.rows.length}, nonMember=${nonMemberGenMsgs.rows.length}`);
     }
+
+    // TEST 20: Full End-to-End Enrollment & Onboarding Sequence
+    total++;
+    process.stdout.write('[Test 20] Testing full enrollment sequence (roster -> account -> sync -> password reset)... ');
+    const e2eRoll = '25MVCSMR7777';
+    const e2eUserId = crypto.randomUUID();
+
+    // Step A: Admin registers roster entry in student_directory
+    await client.query(`
+      INSERT INTO public.student_directory (roll_number, branch_id, admission_year, is_active)
+      VALUES ($1, $2, 2025, true)
+      ON CONFLICT (roll_number) DO UPDATE SET is_active = true, profile_id = NULL;
+    `, [e2eRoll, aimlBranchId]);
+
+    // Step B: Account provisioning in auth.users
+    await client.query(`
+      INSERT INTO auth.users (id, email, encrypted_password, raw_user_meta_data)
+      VALUES ($1, $2, 'temp_hash', $3);
+    `, [e2eUserId, `${e2eRoll.toLowerCase()}@campus.internal`, JSON.stringify({
+      username: e2eRoll,
+      student_id: e2eRoll,
+      must_change_password: true
+    })]);
+
+    // Step C: First login triggers sync_authenticated_student_directory RPC
+    const syncRes = await withAuthenticatedSession(client, e2eUserId, async () => {
+      return await client.query(`SELECT public.sync_authenticated_student_directory() AS res;`);
+    });
+    const parsedSync = syncRes.rows[0].res;
+    if (!parsedSync.linked || !parsedSync.verified) {
+      throw new Error(`Sync failed for provisioned student: ${JSON.stringify(parsedSync)}`);
+    }
+
+    // Step D: Profile verification state and must_change_password check
+    const profCheck = await client.query(`SELECT is_verified, must_change_password, branch_id FROM public.profiles WHERE id = $1;`, [e2eUserId]);
+    if (!profCheck.rows[0].is_verified || !profCheck.rows[0].must_change_password) {
+      throw new Error(`Profile state invalid after sync: ${JSON.stringify(profCheck.rows[0])}`);
+    }
+
+    // Step E: RPC complete_first_time_password_change fails if password not changed in auth.users
+    let prematureClearFailed = false;
+    try {
+      await withAuthenticatedSession(client, e2eUserId, async () => {
+        await client.query(`SELECT public.complete_first_time_password_change();`);
+      });
+    } catch (e) {
+      prematureClearFailed = true;
+    }
+    if (!prematureClearFailed) {
+      throw new Error('complete_first_time_password_change should fail before password update!');
+    }
+
+    // Step F: Password update in auth.users fires trigger and clears must_change_password
+    await client.query(`
+      UPDATE auth.users
+      SET encrypted_password = 'new_secure_password_hash'
+      WHERE id = $1;
+    `, [e2eUserId]);
+
+    const finalProf = await client.query(`SELECT must_change_password FROM public.profiles WHERE id = $1;`, [e2eUserId]);
+    if (finalProf.rows[0].must_change_password !== false) {
+      throw new Error('must_change_password flag was not cleared after authentic password change in auth.users!');
+    }
+
+    // Cleanup e2e fixtures
+    await client.query(`DELETE FROM public.student_directory WHERE roll_number = $1;`, [e2eRoll]);
+    await client.query(`DELETE FROM auth.users WHERE id = $1;`, [e2eUserId]);
+
+    console.log('PASSED (Roster enrolled -> user provisioned -> directory linked & verified -> password update verified)');
+    passed++;
 
     console.log(`\n>> Result for [${testContextName}]: ${passed}/${total} tests PASSED.`);
 

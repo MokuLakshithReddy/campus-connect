@@ -77,23 +77,39 @@ const Clubs = () => {
 
       if (clubsErr) throw clubsErr;
 
-      // Fetch memberships
-      const { data: membersData, error: membersErr } = await supabase
-        .from("club_memberships")
-        .select("club_id, user_id, role, status");
-
-      if (membersErr) throw membersErr;
-
-      const memberships = (membersData || []) as unknown as ClubMembership[];
+      // Fetch only caller's memberships for status and role resolution
+      let userMemberships: ClubMembership[] = [];
+      if (user?.id) {
+        const { data: userMemData, error: membersErr } = await supabase
+          .from("club_memberships")
+          .select("club_id, user_id, role, status")
+          .eq("user_id", user.id);
+        if (membersErr) throw membersErr;
+        userMemberships = (userMemData || []) as unknown as ClubMembership[];
+      }
 
       const rawClubs = (clubsData || []) as unknown as Club[];
+      const clubIds = rawClubs.map((c) => c.id);
+      const memberCounts = new Map<string, number>();
+
+      // Fetch aggregate member counts without exposing full student rosters
+      if (clubIds.length > 0) {
+        const { data: statsData, error: statsErr } = await (supabase.rpc as any)("get_club_member_stats", {
+          p_club_ids: clubIds,
+        });
+        if (!statsErr && Array.isArray(statsData)) {
+          for (const stat of statsData) {
+            memberCounts.set(stat.club_id, Number(stat.member_count));
+          }
+        }
+      }
+
       const enriched: ClubWithMeta[] = rawClubs.map((club) => {
-        const activeMembers = memberships.filter((m) => m.club_id === club.id && m.status === "active");
-        const userMem = memberships.find((m) => m.club_id === club.id && m.user_id === user?.id);
+        const userMem = userMemberships.find((m) => m.club_id === club.id);
 
         return {
           ...club,
-          member_count: activeMembers.length,
+          member_count: memberCounts.get(club.id) ?? 0,
           membership_status: userMem ? userMem.status : null,
           membership_role: userMem?.role,
         };

@@ -383,12 +383,45 @@ async function runTestSuite() {
       COMMIT;
     `);
     const foundUser1 = searchRes.find(r => r.id === user1Id);
-    if (foundUser1 && foundUser1.student_id.startsWith('****') && foundUser1.student_id.endsWith(testRoll.slice(-4))) {
-      console.log(`PASSED (Unverified blocked, cross-branch scraping blocked, own branch masked)`);
-      passed++;
-    } else {
+    if (!foundUser1 || !foundUser1.student_id.startsWith('****') || !foundUser1.student_id.endsWith(testRoll.slice(-4))) {
       throw new Error(`Roll number check failed: ${JSON.stringify(searchRes)}`);
     }
+
+    // Wildcard-only query (%%%) must be blocked from cross-branch searches
+    let wildcardCrossBranchBlocked = false;
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user1Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SELECT * FROM public.search_campus_students('%%%', '${cseBranchId}', 5);
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('Cross-branch search requires at least 3') || err.message.includes('Access restricted')) {
+        wildcardCrossBranchBlocked = true;
+      }
+    }
+    if (!wildcardCrossBranchBlocked) {
+      throw new Error('Wildcard search (%%%) bypassed minimum character length check!');
+    }
+
+    // Wildcard query in own branch searches literally for %%% and does not match all users
+    const wildcardOwnBranch = await querySql(`
+      BEGIN;
+      SET LOCAL ROLE authenticated;
+      SET LOCAL request.jwt.claim.sub = '${user1Id}';
+      SET LOCAL request.jwt.claim.role = 'authenticated';
+      SELECT * FROM public.search_campus_students('%%%', NULL, 20);
+      COMMIT;
+    `);
+    if (wildcardOwnBranch.length !== 0) {
+      throw new Error('Wildcard search (%%%) expanded unexpectedly and matched profiles!');
+    }
+
+    console.log(`PASSED (Unverified blocked, cross-branch scraping blocked, own branch masked, wildcards sanitized)`);
+    passed++;
 
     // 11. Database-Level Audience RLS Policies
     total++;
