@@ -285,16 +285,18 @@ async function runTestSuite() {
     }
     await querySql(`DELETE FROM public.posts WHERE id = '${postTestId}';`);
 
-    // 9. Threat Model: Direct alteration of is_verified without sync RPC is blocked
+    // 9. Threat Model & Regression: Setting internal token gives ZERO authorization bypass
     total++;
-    process.stdout.write('[Test 9] Testing threat model: Direct profile verification bypass attempt... ');
+    process.stdout.write('[Test 9] Testing threat model & regression (caller-controlled token gives zero bypass)... ');
     let directVerifyBlocked = false;
+    let branchTamperBlocked = false;
     try {
       await querySql(`
         BEGIN;
         SET LOCAL ROLE authenticated;
         SET LOCAL request.jwt.claim.sub = '${user2Id}';
         SET LOCAL request.jwt.claim.role = 'authenticated';
+        SET LOCAL internal.active_sync_token = 'malicious_caller_token';
         UPDATE public.profiles SET is_verified = true WHERE id = '${user2Id}';
         COMMIT;
       `);
@@ -303,11 +305,28 @@ async function runTestSuite() {
         directVerifyBlocked = true;
       }
     }
-    if (directVerifyBlocked) {
-      console.log('PASSED (Direct alteration of is_verified blocked by database permissions/internal sync trigger)');
+
+    try {
+      await querySql(`
+        BEGIN;
+        SET LOCAL ROLE authenticated;
+        SET LOCAL request.jwt.claim.sub = '${user2Id}';
+        SET LOCAL request.jwt.claim.role = 'authenticated';
+        SET LOCAL internal.active_sync_token = 'malicious_caller_token';
+        UPDATE public.profiles SET branch_id = '${aimlBranchId}' WHERE id = '${user2Id}';
+        COMMIT;
+      `);
+    } catch (err) {
+      if (err.message.includes('permission denied') || err.message.includes('academic status can only be modified') || err.message.includes('Verification status cannot be modified') || err.message.includes('Unauthorized')) {
+        branchTamperBlocked = true;
+      }
+    }
+
+    if (directVerifyBlocked && branchTamperBlocked) {
+      console.log('PASSED (Both is_verified and branch_id tampering blocked even after client sets internal token)');
       passed++;
     } else {
-      throw new Error('User was able to directly modify is_verified on profiles!');
+      throw new Error(`User was able to bypass protection by setting internal config! verify=${directVerifyBlocked}, branch=${branchTamperBlocked}`);
     }
 
     // 10. Student Discovery Privacy & Scoping Rules

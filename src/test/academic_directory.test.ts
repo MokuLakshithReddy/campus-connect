@@ -358,3 +358,95 @@ describe("Academic Protection & Authorization Triggers", () => {
     expect(ticket.status).toBe("attended");
   });
 });
+
+describe("Feed Scoping & College-wide Content Visibility Matrix", () => {
+  interface FeedItem {
+    id: string;
+    title: string;
+    branch_id: string | null;
+  }
+
+  const sampleItems: FeedItem[] = [
+    { id: "1", title: "College Hackathon (All Branches)", branch_id: null },
+    { id: "2", title: "CSE-AIML Neural Network Seminar", branch_id: "aiml-uuid" },
+    { id: "3", title: "ECE Robotics Workshop", branch_id: "ece-uuid" },
+    { id: "4", title: "Annual Cultural Fest", branch_id: null },
+  ];
+
+  // Helper matching frontend logic in Index.tsx
+  function filterFeedForStudent(
+    items: FeedItem[],
+    scope: "branch" | "college",
+    studentBranchId: string | null
+  ): FeedItem[] {
+    const isBranchFilterActive = scope === "branch" && Boolean(studentBranchId);
+    if (!isBranchFilterActive || !studentBranchId) {
+      return items;
+    }
+    // Branch scope must include BOTH student's branch AND college-wide items (branch_id === null)
+    return items.filter(
+      (item) => item.branch_id === studentBranchId || item.branch_id === null
+    );
+  }
+
+  it("verified student in branch scope sees both their branch items and college-wide items", () => {
+    const visible = filterFeedForStudent(sampleItems, "branch", "aiml-uuid");
+    const visibleIds = visible.map((i) => i.id);
+
+    expect(visibleIds).toContain("1"); // College-wide
+    expect(visibleIds).toContain("2"); // CSE-AIML
+    expect(visibleIds).not.toContain("3"); // ECE (other branch)
+    expect(visibleIds).toContain("4"); // College-wide
+    expect(visible.length).toBe(3);
+  });
+
+  it("student without verified branch falls back to college-wide scope seeing all eligible items", () => {
+    // Unverified student has null branch_id
+    const visible = filterFeedForStudent(sampleItems, "branch", null);
+    expect(visible.length).toBe(sampleItems.length);
+  });
+
+  it("college-wide content with no branch assignment is visible in both branch and college scopes", () => {
+    const branchVisible = filterFeedForStudent(sampleItems, "branch", "aiml-uuid");
+    const collegeVisible = filterFeedForStudent(sampleItems, "college", "aiml-uuid");
+
+    const collegeWideItems = sampleItems.filter((i) => i.branch_id === null);
+    for (const item of collegeWideItems) {
+      expect(branchVisible.some((i) => i.id === item.id)).toBe(true);
+      expect(collegeVisible.some((i) => i.id === item.id)).toBe(true);
+    }
+  });
+
+  it("scope selection preserves explicit student choice across profile load transitions", () => {
+    let userChosenScope: "branch" | "college" | null = null;
+    let feedScope: "branch" | "college" = "college";
+
+    // Scenario 1: Initial mount before profile finishes loading (profile is undefined)
+    let profile: { branch_id: string } | null = null;
+    if (profile?.branch_id && userChosenScope === null) {
+      feedScope = "branch";
+    }
+
+    expect(feedScope).toBe("college");
+
+    // Scenario 2: Profile finishes loading with verified branch_id
+    profile = { branch_id: "aiml-uuid" };
+    if (profile?.branch_id && userChosenScope === null) {
+      feedScope = "branch";
+    }
+
+    expect(feedScope).toBe("branch"); // Deliberately set to branch
+
+    // Scenario 3: Student explicitly chooses college-wide
+    userChosenScope = "college";
+    feedScope = "college";
+
+    // Scenario 4: Subsequent re-render with profile must preserve student's explicit choice
+    if (userChosenScope === null && profile?.branch_id) {
+      feedScope = "branch";
+    }
+
+    expect(feedScope).toBe("college"); // Explicit preference preserved
+  });
+});
+

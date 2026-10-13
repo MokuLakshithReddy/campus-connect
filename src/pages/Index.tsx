@@ -64,13 +64,15 @@ const Index = () => {
   const [announcements, setAnnouncements] = useState<AnnouncementNotice[]>([]);
   const [featuredClubs, setFeaturedClubs] = useState<FeaturedClub[]>([]);
   const [selectedCategory, setSelectedCategory] = useState("All");
+  // User's manual selection if any; null means user has not explicitly toggled scope yet
+  const [userChosenScope, setUserChosenScope] = useState<"branch" | "college" | null>(null);
   // Default to branch scope ONLY if student has a verified branch_id; otherwise safely fall back to college-wide
   const [feedScope, setFeedScope] = useState<"branch" | "college">(() => (profile?.branch_id ? "branch" : "college"));
   const [verifiedBranch, setVerifiedBranch] = useState<{ course: string; branch_code: string; display_name: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [feedError, setFeedError] = useState<string | null>(null);
 
-  // Authoritatively load verified academic branch info from database using profile.branch_id
+  // Deliberately set default scope once verified profile loads, while preserving student's manual choices
   useEffect(() => {
     if (profile?.branch_id) {
       supabase
@@ -81,12 +83,19 @@ const Index = () => {
         .then(({ data }) => {
           if (data) setVerifiedBranch(data);
         });
+
+      // When verified profile finishes loading, set default scope to branch unless student explicitly chose otherwise
+      if (userChosenScope === null) {
+        setFeedScope("branch");
+      }
     } else {
       setVerifiedBranch(null);
       // Fallback safely to college-wide if user's branch is not linked/unknown
-      setFeedScope("college");
+      if (userChosenScope === null) {
+        setFeedScope("college");
+      }
     }
-  }, [profile?.branch_id]);
+  }, [profile?.branch_id, userChosenScope]);
 
   const loadCampusFeed = useCallback(async () => {
     try {
@@ -95,7 +104,7 @@ const Index = () => {
 
       const isBranchFilterActive = feedScope === "branch" && Boolean(profile?.branch_id);
 
-      // 1. Fetch Featured Active Clubs
+      // 1. Fetch Featured Active Clubs (Include both student's branch and college-wide clubs)
       let clubsQuery = supabase
         .from("clubs")
         .select("id, name, description, category, status, branch_id")
@@ -103,7 +112,7 @@ const Index = () => {
         .limit(6);
 
       if (isBranchFilterActive && profile?.branch_id) {
-        clubsQuery = clubsQuery.eq("branch_id", profile.branch_id);
+        clubsQuery = clubsQuery.or(`branch_id.eq.${profile.branch_id},branch_id.is.null`);
       }
 
       const { data: clubsData, error: clubsError } = await clubsQuery;
@@ -117,7 +126,7 @@ const Index = () => {
         status: c.status,
       })));
 
-      // 2. Fetch Upcoming Campus Events
+      // 2. Fetch Upcoming Campus Events (Include both student's branch and college-wide events)
       let eventsQuery = supabase
         .from("events")
         .select(`
@@ -135,7 +144,7 @@ const Index = () => {
         .limit(4);
 
       if (isBranchFilterActive && profile?.branch_id) {
-        eventsQuery = eventsQuery.eq("branch_id", profile.branch_id);
+        eventsQuery = eventsQuery.or(`branch_id.eq.${profile.branch_id},branch_id.is.null`);
       }
 
       const { data: rawEvents, error: eventsError } = await eventsQuery;
@@ -167,7 +176,7 @@ const Index = () => {
       }));
       setEvents(parsedEvents);
 
-      // 3. Fetch Official Announcements
+      // 3. Fetch Official Announcements (Include both student's branch and college-wide notices)
       let noticesQuery = supabase
         .from("channel_messages")
         .select(`
@@ -186,7 +195,7 @@ const Index = () => {
         .limit(5);
 
       if (isBranchFilterActive && profile?.branch_id) {
-        noticesQuery = noticesQuery.eq("branch_id", profile.branch_id);
+        noticesQuery = noticesQuery.or(`branch_id.eq.${profile.branch_id},branch_id.is.null`);
       }
 
       const { data: rawNotices, error: noticesError } = await noticesQuery;
@@ -368,6 +377,7 @@ const Index = () => {
                       toast.info("Your account is not linked to an active academic branch. Scope remains college-wide.");
                       return;
                     }
+                    setUserChosenScope("branch");
                     setFeedScope("branch");
                   }}
                   className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
@@ -380,7 +390,10 @@ const Index = () => {
                   <span>My Branch {verifiedBranch ? `(${verifiedBranch.branch_code})` : profile?.branch_id ? "" : "(Unlinked)"}</span>
                 </button>
                 <button
-                  onClick={() => setFeedScope("college")}
+                  onClick={() => {
+                    setUserChosenScope("college");
+                    setFeedScope("college");
+                  }}
                   className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
                     feedScope === "college" || !profile?.branch_id
                       ? "bg-background text-foreground shadow-xs border"

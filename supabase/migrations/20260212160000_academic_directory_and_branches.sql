@@ -149,6 +149,17 @@ REVOKE ALL ON FUNCTION public.validate_student_directory_prefix() FROM PUBLIC;
 -- 6. PROFILE ACADEMIC INTEGRITY & ROLE ESCALATION PROTECTION TRIGGER
 -- DEDICATED PRIVILEGED ACADEMIC LINKING OPERATION
 -- Narrowly scoped procedure callable only by verified internal routines.
+CREATE SCHEMA IF NOT EXISTS internal;
+REVOKE ALL ON SCHEMA internal FROM PUBLIC, authenticated, anon;
+GRANT ALL ON SCHEMA internal TO postgres;
+
+CREATE TABLE IF NOT EXISTS internal.active_sync_authorizations (
+  user_id UUID PRIMARY KEY,
+  authorized_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+);
+REVOKE ALL ON TABLE internal.active_sync_authorizations FROM PUBLIC, authenticated, anon;
+GRANT ALL ON TABLE internal.active_sync_authorizations TO postgres;
+
 CREATE OR REPLACE FUNCTION public.internal_apply_directory_verification(
   p_user_id UUID,
   p_branch_id UUID,
@@ -159,11 +170,11 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-DECLARE
-  v_sync_token TEXT := pg_catalog.gen_random_uuid()::text;
 BEGIN
-  -- Set transaction-local random token to authorize academic status update in trigger
-  PERFORM pg_catalog.set_config('internal.active_sync_token', v_sync_token, true);
+  -- Register authorization entry in private internal table
+  INSERT INTO internal.active_sync_authorizations (user_id, authorized_at)
+  VALUES (p_user_id, pg_catalog.clock_timestamp())
+  ON CONFLICT (user_id) DO UPDATE SET authorized_at = pg_catalog.clock_timestamp();
 
   UPDATE public.profiles
   SET branch_id = p_branch_id,
@@ -172,8 +183,8 @@ BEGIN
       updated_at = pg_catalog.now()
   WHERE id = p_user_id;
 
-  -- Clear authorization token
-  PERFORM pg_catalog.set_config('internal.active_sync_token', '', true);
+  -- Clear authorization record immediately
+  DELETE FROM internal.active_sync_authorizations WHERE user_id = p_user_id;
 END;
 $$;
 
@@ -220,8 +231,11 @@ BEGIN
 
       IF (OLD.branch_id IS NOT NULL AND NEW.branch_id IS DISTINCT FROM OLD.branch_id) OR
          (NEW.is_verified IS DISTINCT FROM OLD.is_verified) THEN
-        IF pg_catalog.current_setting('internal.active_sync_token', true) IS NULL OR
-           pg_catalog.current_setting('internal.active_sync_token', true) = '' THEN
+        IF NOT EXISTS (
+          SELECT 1 FROM internal.active_sync_authorizations
+          WHERE user_id = NEW.id
+            AND authorized_at >= pg_catalog.clock_timestamp() - INTERVAL '10 seconds'
+        ) THEN
           RAISE EXCEPTION 'Unauthorized: Academic status can only be modified through verified directory synchronization';
         END IF;
       END IF;

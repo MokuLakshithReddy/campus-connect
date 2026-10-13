@@ -17,7 +17,8 @@
  * - Self-escalation prevention on UPDATE (college_role cannot be self-modified)
  * - Self-escalation prevention on INSERT (auth user fixture + forced downgrade to student, unverified)
  * - Anti-spoofing branch triggers on posts (INSERT & UPDATE)
- * - Elimination of brittle PG_CONTEXT: Dedicated internal updater with transaction-local token
+ * - Non-forgeable internal authorization table (internal.active_sync_authorizations)
+ * - Regression test: Setting internal.active_sync_token gives ZERO bypass capability
  * - search_campus_students privacy scoping, cross-branch scraping protection, and masking
  * - PostgreSQL RLS audience enforcement (college vs branch)
  * - Student directory integrity audit function (audit_student_directory_integrity)
@@ -171,8 +172,15 @@ async function resetPublicSchema(client) {
     CREATE SCHEMA public;
     GRANT ALL ON SCHEMA public TO postgres;
     GRANT USAGE, CREATE ON SCHEMA public TO public;
-    GRANT USAGE, CREATE ON SCHEMA public TO authenticated;
-    GRANT USAGE, CREATE ON SCHEMA public TO anon;
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        GRANT USAGE, CREATE ON SCHEMA public TO authenticated;
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        GRANT USAGE, CREATE ON SCHEMA public TO anon;
+      END IF;
+    END $$;
   `);
 }
 
@@ -239,7 +247,7 @@ async function runSecurityTestSuite(client, testContextName) {
       throw new Error(`Failed to resolve roll number: ${JSON.stringify(resolveRes.rows)}`);
     }
 
-    // Setup Test Fixtures
+    // Setup Test Fixtures (Each SQL command is a single statement to avoid extended protocol prepared statement error)
     const aimlBranch = await client.query("SELECT id FROM public.academic_branches WHERE course='B.Tech' AND branch_code='CSE-AIML';");
     const cseBranch = await client.query("SELECT id FROM public.academic_branches WHERE course='B.Tech' AND branch_code='CSE';");
     const aimlBranchId = aimlBranch.rows[0].id;
@@ -255,8 +263,6 @@ async function runSecurityTestSuite(client, testContextName) {
       VALUES 
         ($1, 'authenticated', 'authenticated', $3, json_build_object('username', $4, 'student_id', $5)),
         ($2, 'authenticated', 'authenticated', $6, json_build_object('username', $7, 'student_id', $5));
-
-      UPDATE public.profiles SET student_id = $5 WHERE id IN ($1, $2);
     `, [
       user1Id,
       user2Id,
@@ -266,6 +272,10 @@ async function runSecurityTestSuite(client, testContextName) {
       `user2_${testRunId}@ci.test`,
       `user2_${testRunId}`
     ]);
+
+    await client.query(`
+      UPDATE public.profiles SET student_id = $1 WHERE id IN ($2, $3);
+    `, [testRoll, user1Id, user2Id]);
 
     // TEST 3: User 1 Directory Linking Flow with Transactional Identity
     total++;
@@ -348,7 +358,7 @@ async function runSecurityTestSuite(client, testContextName) {
       throw new Error('Student was able to self-escalate college_role to college_admin!');
     }
 
-    // TEST 7: Role Escalation Prevention on INSERT (FIXED FIXTURE: Auth User created first)
+    // TEST 7: Role Escalation Prevention on INSERT (FIXED FIXTURE: Auth User created first, separate queries)
     total++;
     process.stdout.write('[Test 7] Testing privilege escalation protection on INSERT (proper auth fixture)... ');
     
@@ -356,11 +366,14 @@ async function runSecurityTestSuite(client, testContextName) {
     await client.query(`
       INSERT INTO auth.users (id, aud, role, email, raw_user_meta_data)
       VALUES ($1, 'authenticated', 'authenticated', $2, json_build_object('username', $3));
-      -- Remove auto-created profile so we can test the explicit INSERT path
-      DELETE FROM public.profiles WHERE id = $1;
     `, [evilUserId, `evil_${testRunId}@ci.test`, `evil_${testRunId}`]);
 
-    // 2. Attempt privileged profile insert as authenticated ordinary user
+    // 2. Remove auto-created profile so we can test the explicit INSERT path
+    await client.query(`
+      DELETE FROM public.profiles WHERE id = $1;
+    `, [evilUserId]);
+
+    // 3. Attempt privileged profile insert as authenticated ordinary user
     await withAuthenticatedSession(client, evilUserId, async () => {
       await client.query(`
         INSERT INTO public.profiles (id, username, college_role, is_verified)
@@ -368,7 +381,7 @@ async function runSecurityTestSuite(client, testContextName) {
       `);
     });
 
-    // 3. Assert resulting profile has college_role = 'student' and is_verified = false
+    // 4. Assert resulting profile has college_role = 'student' and is_verified = false
     const evilProfile = await client.query(`SELECT college_role, is_verified FROM public.profiles WHERE id = $1;`, [evilUserId]);
     if (evilProfile.rows[0]?.college_role === 'student' && evilProfile.rows[0]?.is_verified === false) {
       console.log('PASSED (Non-admin INSERT automatically forced to college_role=student, is_verified=false)');
@@ -433,12 +446,16 @@ async function runSecurityTestSuite(client, testContextName) {
     }
     await client.query(`DELETE FROM public.posts WHERE id = '${user1PostId}';`);
 
-    // TEST 10: Threat Model: Reject Direct Alteration of is_verified without Trusted RPC
+    // TEST 10: Threat Model & Regression: Setting internal config gives ZERO authorization bypass
     total++;
-    process.stdout.write('[Test 10] Testing threat model: Direct profile verification bypass attempt... ');
+    process.stdout.write('[Test 10] Testing threat model & regression (caller-controlled session token gives zero bypass)... ');
     let directVerifyBlocked = false;
+    let branchTamperBlocked = false;
+
+    // A. Attempt to set internal.active_sync_token and self-verify
     try {
       await withAuthenticatedSession(client, user2Id, async () => {
+        await client.query(`SET LOCAL internal.active_sync_token = 'malicious_caller_token';`);
         await client.query(`UPDATE public.profiles SET is_verified = true WHERE id = '${user2Id}';`);
       });
     } catch (err) {
@@ -446,11 +463,24 @@ async function runSecurityTestSuite(client, testContextName) {
         directVerifyBlocked = true;
       }
     }
-    if (directVerifyBlocked) {
-      console.log('PASSED (Direct alteration of is_verified blocked by column permissions / internal sync token)');
+
+    // B. Attempt to set internal.active_sync_token and change branch
+    try {
+      await withAuthenticatedSession(client, user2Id, async () => {
+        await client.query(`SET LOCAL internal.active_sync_token = 'malicious_caller_token';`);
+        await client.query(`UPDATE public.profiles SET branch_id = '${aimlBranchId}' WHERE id = '${user2Id}';`);
+      });
+    } catch (err) {
+      if (err.message.includes('permission denied') || err.message.includes('academic status can only be modified') || err.message.includes('Unauthorized')) {
+        branchTamperBlocked = true;
+      }
+    }
+
+    if (directVerifyBlocked && branchTamperBlocked) {
+      console.log('PASSED (Both is_verified and branch_id tampering blocked even after client sets internal token)');
       passed++;
     } else {
-      throw new Error('User was able to directly modify is_verified on profiles!');
+      throw new Error(`Security bypass succeeded! directVerifyBlocked=${directVerifyBlocked}, branchTamperBlocked=${branchTamperBlocked}`);
     }
 
     // TEST 11: Privacy & Scoping in search_campus_students RPC
@@ -552,13 +582,11 @@ async function runSecurityTestSuite(client, testContextName) {
 
   } finally {
     try {
-      await client.query(`
-        DELETE FROM public.student_directory WHERE roll_number = $1;
-        DELETE FROM auth.users WHERE id IN ($2, $3, $4);
-      `, [testRoll, user1Id, user2Id, evilUserId]);
-    } catch (e) {
-      // Ignored in cleanup
-    }
+      await client.query(`DELETE FROM public.student_directory WHERE roll_number = $1;`, [testRoll]);
+    } catch (e) {}
+    try {
+      await client.query(`DELETE FROM auth.users WHERE id IN ($1, $2, $3);`, [user1Id, user2Id, evilUserId]);
+    } catch (e) {}
   }
 }
 
@@ -581,8 +609,8 @@ async function runCiIntegrationTests() {
       console.log('\n================================================================================');
       console.log('PATH 1: Clean DB -> Bootstrap -> Apply Sequential Migrations (supabase/migrations/)');
       console.log('================================================================================');
-      await resetPublicSchema(client);
       await bootstrapEnvironment(client);
+      await resetPublicSchema(client);
       await applyMigrationsSequentially(client);
       await runSecurityTestSuite(client, 'Path 1: Sequential Migrations');
     }
@@ -594,8 +622,8 @@ async function runCiIntegrationTests() {
       console.log('\n================================================================================');
       console.log('PATH 2: Clean DB -> Bootstrap -> Apply Consolidated Master Schema (supabase/schema.sql)');
       console.log('================================================================================');
-      await resetPublicSchema(client);
       await bootstrapEnvironment(client);
+      await resetPublicSchema(client);
       await applyConsolidatedSchema(client);
       await runSecurityTestSuite(client, 'Path 2: Consolidated Schema');
     }
