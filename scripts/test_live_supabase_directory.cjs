@@ -534,11 +534,11 @@ async function runTestSuite() {
 
     // Insert 3 test events under different visibility scopes
     await querySql(`
-      INSERT INTO public.events (id, club_id, title, venue, start_time, is_published, content_visibility, branch_id, created_by)
+      INSERT INTO public.events (id, club_id, title, description, venue, start_time, end_time, capacity, is_published, content_visibility, branch_id, created_by)
       VALUES 
-        ('${collegeEventId}', '${testClubId}', 'College Fest', 'Main Hall', now() + interval '1 day', true, 'college', NULL, '${user1Id}'),
-        ('${branchEventId}', '${testClubId}', 'AIML Workshop', 'Lab 1', now() + interval '2 days', true, 'branch', '${aimlBranchId}', '${user1Id}'),
-        ('${memberEventId}', '${testClubId}', 'Secret Club Meeting', 'Room 10', now() + interval '3 days', true, 'club_members', '${aimlBranchId}', '${user1Id}');
+        ('${collegeEventId}', '${testClubId}', 'College Fest', 'Annual college fest celebration', 'Main Hall', now() + interval '1 day', now() + interval '1 day 4 hours', 200, true, 'college', NULL, '${user1Id}'),
+        ('${branchEventId}', '${testClubId}', 'AIML Workshop', 'AI & ML hands-on workshop', 'Lab 1', now() + interval '2 days', now() + interval '2 days 3 hours', 60, true, 'branch', '${aimlBranchId}', '${user1Id}'),
+        ('${memberEventId}', '${testClubId}', 'Secret Club Meeting', 'Internal club meeting', 'Room 10', now() + interval '3 days', now() + interval '3 days 2 hours', 30, true, 'club_members', '${aimlBranchId}', '${user1Id}');
     `);
 
     // User 2 (not in AIML branch, not a club member) queries events

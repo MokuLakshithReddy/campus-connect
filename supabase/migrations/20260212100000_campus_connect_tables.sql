@@ -66,18 +66,18 @@ CREATE TABLE IF NOT EXISTS public.events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   club_id UUID NOT NULL REFERENCES public.clubs(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
-  description TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
   cover_url TEXT,
   venue TEXT NOT NULL,
   start_time TIMESTAMPTZ NOT NULL,
-  end_time TIMESTAMPTZ NOT NULL,
-  capacity INT NOT NULL CHECK (capacity > 0),
+  end_time TIMESTAMPTZ,
+  capacity INT NOT NULL DEFAULT 100 CHECK (capacity > 0),
   is_published BOOLEAN DEFAULT true,
   registered_count INT DEFAULT 0,
   created_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now(),
-  CHECK (end_time > start_time)
+  CHECK (end_time IS NULL OR end_time > start_time)
 );
 
 -- 7. EVENT REGISTRATIONS TABLE
