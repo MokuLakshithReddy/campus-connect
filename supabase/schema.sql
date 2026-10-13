@@ -208,6 +208,144 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- 2.1 SOCIAL TABLES (POSTS, LIKES, COMMENTS, FOLLOWERS)
+CREATE TABLE IF NOT EXISTS public.posts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  image_url TEXT NOT NULL,
+  caption TEXT DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE public.posts ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.likes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, post_id)
+);
+ALTER TABLE public.likes ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.comments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  post_id UUID NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE public.comments ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.followers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  follower_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  following_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(follower_id, following_id),
+  CHECK (follower_id != following_id)
+);
+ALTER TABLE public.followers ENABLE ROW LEVEL SECURITY;
+
+-- 2.2 DIRECT MESSAGING (CONVERSATIONS & MESSAGES)
+CREATE TABLE IF NOT EXISTS public.conversations (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  user1_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  user2_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  last_message_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  UNIQUE(user1_id, user2_id)
+);
+ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.messages (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  conversation_id UUID NOT NULL REFERENCES public.conversations(id) ON DELETE CASCADE,
+  sender_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  is_read BOOLEAN NOT NULL DEFAULT false,
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+
+-- BASELINE CONVERSATION AND MESSAGE POLICIES
+DROP POLICY IF EXISTS "Users can view own conversations" ON public.conversations;
+CREATE POLICY "Users can view own conversations"
+  ON public.conversations FOR SELECT
+  USING (auth.uid() = user1_id OR auth.uid() = user2_id);
+
+DROP POLICY IF EXISTS "Auth users can create conversations" ON public.conversations;
+CREATE POLICY "Auth users can create conversations"
+  ON public.conversations FOR INSERT
+  WITH CHECK (auth.uid() = user1_id OR auth.uid() = user2_id);
+
+DROP POLICY IF EXISTS "Users can update own conversations" ON public.conversations;
+CREATE POLICY "Users can update own conversations"
+  ON public.conversations FOR UPDATE
+  USING (auth.uid() = user1_id OR auth.uid() = user2_id);
+
+DROP POLICY IF EXISTS "Users can view messages in their conversations" ON public.messages;
+CREATE POLICY "Users can view messages in their conversations"
+  ON public.messages FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.conversations c
+      WHERE c.id = conversation_id
+      AND (c.user1_id = auth.uid() OR c.user2_id = auth.uid())
+    )
+  );
+
+DROP POLICY IF EXISTS "Users can send messages in their conversations" ON public.messages;
+CREATE POLICY "Users can send messages in their conversations"
+  ON public.messages FOR INSERT
+  WITH CHECK (
+    auth.uid() = sender_id AND
+    EXISTS (
+      SELECT 1 FROM public.conversations c
+      WHERE c.id = conversation_id
+      AND (c.user1_id = auth.uid() OR c.user2_id = auth.uid())
+    )
+  );
+
+-- BASELINE SOCIAL POLICIES
+DROP POLICY IF EXISTS "Auth users can create posts" ON public.posts;
+CREATE POLICY "Auth users can create posts" ON public.posts FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can update own posts" ON public.posts;
+CREATE POLICY "Users can update own posts" ON public.posts FOR UPDATE TO authenticated USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete own posts" ON public.posts;
+CREATE POLICY "Users can delete own posts" ON public.posts FOR DELETE TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Anyone can view likes" ON public.likes;
+DROP POLICY IF EXISTS "Likes are viewable by authenticated users" ON public.likes;
+CREATE POLICY "Likes are viewable by authenticated users" ON public.likes FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "Auth users can like" ON public.likes;
+CREATE POLICY "Auth users can like" ON public.likes FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can unlike" ON public.likes;
+CREATE POLICY "Users can unlike" ON public.likes FOR DELETE TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Anyone can view comments" ON public.comments;
+DROP POLICY IF EXISTS "Comments are viewable by authenticated users" ON public.comments;
+CREATE POLICY "Comments are viewable by authenticated users" ON public.comments FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "Auth users can comment" ON public.comments;
+CREATE POLICY "Auth users can comment" ON public.comments FOR INSERT TO authenticated WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can delete own comments" ON public.comments;
+CREATE POLICY "Users can delete own comments" ON public.comments FOR DELETE TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Anyone can view followers" ON public.followers;
+DROP POLICY IF EXISTS "Followers are viewable by authenticated users" ON public.followers;
+CREATE POLICY "Followers are viewable by authenticated users" ON public.followers FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "Auth users can follow" ON public.followers;
+CREATE POLICY "Auth users can follow" ON public.followers FOR INSERT TO authenticated WITH CHECK (auth.uid() = follower_id);
+DROP POLICY IF EXISTS "Users can unfollow" ON public.followers;
+CREATE POLICY "Users can unfollow" ON public.followers FOR DELETE TO authenticated USING (auth.uid() = follower_id);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.posts TO authenticated;
+GRANT SELECT, INSERT, DELETE ON public.likes TO authenticated;
+GRANT SELECT, INSERT, DELETE ON public.comments TO authenticated;
+GRANT SELECT, INSERT, DELETE ON public.followers TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.conversations TO authenticated;
+GRANT SELECT, INSERT ON public.messages TO authenticated;
+
 -- 3. CLUBS TABLE
 CREATE TABLE IF NOT EXISTS public.clubs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
