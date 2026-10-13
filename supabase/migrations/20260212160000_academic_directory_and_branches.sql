@@ -331,6 +331,7 @@ GRANT SELECT (
 GRANT INSERT ON public.profiles TO authenticated;
 
 -- Dedicated secure RPC for authenticated users to view their own full profile including student_id
+DROP FUNCTION IF EXISTS public.get_my_profile();
 CREATE OR REPLACE FUNCTION public.get_my_profile()
 RETURNS TABLE (
   id UUID,

@@ -14,6 +14,7 @@ ALTER TABLE public.profiles
 
 -- 2. DEDICATED AUTHENTICATED FALLBACK RPC FOR CALLER'S OWN PROFILE
 -- Solves column permission restriction while preserving privacy
+DROP FUNCTION IF EXISTS public.get_my_profile_fallback();
 CREATE OR REPLACE FUNCTION public.get_my_profile_fallback()
 RETURNS TABLE (
   id UUID,
