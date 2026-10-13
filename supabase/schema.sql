@@ -876,6 +876,7 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- 2. CONTROLLED CANCELLATION
+DROP FUNCTION IF EXISTS public.cancel_event_registration(UUID);
 CREATE OR REPLACE FUNCTION public.cancel_event_registration(p_event_id UUID)
 RETURNS JSONB AS $$
 DECLARE

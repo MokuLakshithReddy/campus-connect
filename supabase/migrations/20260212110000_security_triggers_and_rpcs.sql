@@ -551,29 +551,20 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- CANCEL EVENT REGISTRATION RPC
-CREATE OR REPLACE FUNCTION public.cancel_event_registration(p_registration_id UUID)
+DROP FUNCTION IF EXISTS public.cancel_event_registration(UUID);
+CREATE OR REPLACE FUNCTION public.cancel_event_registration(p_event_id UUID)
 RETURNS JSONB AS $$
 DECLARE
   v_user_id UUID := auth.uid();
-  v_reg RECORD;
 BEGIN
-  SELECT * INTO v_reg
-  FROM public.event_registrations
-  WHERE id = p_registration_id AND user_id = v_user_id;
-
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Registration not found or not owned by caller';
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
   END IF;
 
-  IF v_reg.status = 'cancelled' THEN
-    RAISE EXCEPTION 'Registration already cancelled';
-  END IF;
+  DELETE FROM public.event_registrations
+  WHERE event_id = p_event_id AND user_id = v_user_id;
 
-  UPDATE public.event_registrations
-  SET status = 'cancelled'
-  WHERE id = p_registration_id;
-
-  RETURN jsonb_build_object('success', true, 'registration_id', p_registration_id, 'status', 'cancelled');
+  RETURN jsonb_build_object('success', true, 'message', 'Registration cancelled successfully');
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
