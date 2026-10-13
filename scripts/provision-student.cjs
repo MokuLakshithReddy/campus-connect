@@ -5,13 +5,14 @@
  */
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 
 // Explicit target URL is required — no silent fallbacks to production
 const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 if (!rawSupabaseUrl || !rawSupabaseUrl.trim()) {
   console.error("ERROR: SUPABASE_URL (or VITE_SUPABASE_URL) environment variable is strictly required.");
   console.error("Implicit defaulting to production or hardcoded projects has been disabled for safety.");
-  console.error("Usage: SUPABASE_URL=https://<project-ref>.supabase.co SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME]");
+  console.error("Usage: SUPABASE_URL=https://<project-ref>.supabase.co SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME] [ACTIVATION_PASSWORD]");
   process.exit(1);
 }
 
@@ -42,7 +43,7 @@ const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!SERVICE_ROLE_KEY) {
   console.error("ERROR: SUPABASE_SERVICE_ROLE_KEY environment variable is required.");
-  console.error("Usage: SUPABASE_URL=https://<project-ref>.supabase.co SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME]");
+  console.error("Usage: SUPABASE_URL=https://<project-ref>.supabase.co SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME] [ACTIVATION_PASSWORD]");
   process.exit(1);
 }
 
@@ -50,7 +51,7 @@ if (!SERVICE_ROLE_KEY) {
 const rawRollNumber = process.argv[2];
 if (!rawRollNumber || rawRollNumber.trim().length === 0) {
   console.error("ERROR: Roll number is required as the first argument.");
-  console.error("Usage: node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME]");
+  console.error("Usage: node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME] [ACTIVATION_PASSWORD]");
   process.exit(1);
 }
 
@@ -67,7 +68,39 @@ const department = process.argv[3] || 'Computer Science & Engineering';
 const year = process.argv[4] || '1st Year';
 const fullName = process.argv[5] || rollNumber;
 const email = `${rollNumber.toLowerCase()}@campus.internal`;
-const temporaryPassword = rollNumber; // Initial onboarding credential set to roll number
+
+// Cryptographically secure activation credential generation
+function generateHighEntropyActivationPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!#$*';
+  let token = 'CC-';
+  const randomBytes = crypto.randomBytes(16);
+  for (let i = 0; i < 16; i++) {
+    if (i > 0 && i % 4 === 0) token += '-';
+    token += chars[randomBytes[i] % chars.length];
+  }
+  return token;
+}
+
+const customPasswordArg = process.env.ACTIVATION_PASSWORD || process.argv[6];
+let temporaryPassword;
+if (customPasswordArg && customPasswordArg.trim()) {
+  const cleanPass = customPasswordArg.trim();
+  if (cleanPass.toUpperCase() === rollNumber.toUpperCase()) {
+    console.error(`FATAL SECURITY ERROR: Activation credential cannot match roll number '${rollNumber}'.`);
+    console.error("Predictable initial passwords allow account takeover. Provide a random high-entropy credential.");
+    process.exit(1);
+  }
+  if (cleanPass.length < 8) {
+    console.error("ERROR: Custom activation password must be at least 8 characters long.");
+    process.exit(1);
+  }
+  temporaryPassword = cleanPass;
+} else {
+  temporaryPassword = generateHighEntropyActivationPassword();
+}
+
+// 72-hour expiration window for un-redeemed activation credentials
+const activationExpiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
 
 function sendRequest(options, data) {
   const isHttp = parsedUrl && parsedUrl.protocol === 'http:';
@@ -332,7 +365,8 @@ async function provisionStudent() {
       full_name: fullName,
       department: branchResolution.display_name || department,
       year,
-      must_change_password: true
+      must_change_password: true,
+      activation_expires_at: activationExpiresAt
     }
   };
 
@@ -452,8 +486,17 @@ async function provisionStudent() {
   console.log(`  - College Role:         ${prof.college_role}`);
   console.log(`  - Must Change Password: ${prof.must_change_password}`);
 
-  // Final confirmation ONLY when all validation steps have passed
-  console.log(`\nSUCCESS: Student ${rollNumber} is verified, provisioned, and ready for first-time password reset onboarding.`);
+  // Final confirmation with secure activation credential instructions
+  console.log(`\n================================================================================`);
+  console.log(`SUCCESS: Student ${rollNumber} is verified and provisioned.`);
+  console.log(`================================================================================`);
+  console.log(`[Activation Credential Delivery]`);
+  console.log(`  - Student Roll Number:   ${rollNumber}`);
+  console.log(`  - One-Time Activation:   ${temporaryPassword}`);
+  console.log(`  - Activation Expiration: ${activationExpiresAt} (72 hours)`);
+  console.log(`\nACTION REQUIRED: Issue this one-time activation credential directly to the verified`);
+  console.log(`student via official campus channels. Never use roll numbers as temporary passwords.`);
+  console.log(`================================================================================\n`);
 }
 
 async function rollbackAuthUser(userId) {

@@ -138,7 +138,7 @@ const Auth = () => {
                   </Label>
                   {!isEmailMode && (
                     <span className="text-[11px] text-muted-foreground">
-                      First login: roll number
+                      First login: activation password
                     </span>
                   )}
                 </div>
@@ -191,7 +191,7 @@ const Auth = () => {
                 <span>College-Provisioned Accounts</span>
               </div>
               <p>
-                Student accounts are created by your campus administration. On your first login, enter your <strong>Roll Number</strong> as both username and temporary password.
+                Student accounts are created by campus administration. On your first login, enter your <strong>Roll Number</strong> and the random, one-time <strong>Activation Password</strong> securely issued by your department.
               </p>
             </div>
 

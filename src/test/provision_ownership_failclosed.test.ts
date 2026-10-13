@@ -265,10 +265,22 @@ describe("Provisioning Script: Fail-Closed Profile Ownership Resolution", () => 
       expect(ownershipCheckExecuted).toBe(true);
       expect(authUserCreateAttempts).toBe(1);
       expect(result.stdout).toContain("Verified: No conflicting existing profile found for roll number 25MVCSMR0001");
-      expect(result.stdout).toContain("SUCCESS: Student 25MVCSMR0001 is verified, provisioned");
+      expect(result.stdout).toContain("SUCCESS: Student 25MVCSMR0001 is verified and provisioned");
       expect(result.code).toBe(0);
     } finally {
       server.close();
     }
+  });
+
+  it("strictly rejects provisioning when provided password equals student roll number", async () => {
+    const result = await runProvisioningScript({
+      SUPABASE_URL: "http://127.0.0.1:54321",
+      SUPABASE_SERVICE_ROLE_KEY: "test-service-key",
+      ACTIVATION_PASSWORD: "25MVCSMR0001", // Predictable roll-number password
+    }, "25MVCSMR0001");
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("FATAL SECURITY ERROR: Activation credential cannot match roll number");
+    expect(result.stderr).toContain("Predictable initial passwords allow account takeover");
   });
 });

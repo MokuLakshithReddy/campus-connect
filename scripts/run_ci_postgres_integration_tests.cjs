@@ -977,6 +977,71 @@ async function runSecurityTestSuite(client, testContextName) {
     console.log('PASSED (Roster enrolled -> user provisioned -> directory linked & verified -> password update verified)');
     passed++;
 
+    // TEST 21: Profile Fallback Recovery & Database Column-Permission Enforcement
+    total++;
+    process.stdout.write('[Test 21] Testing profile fallback recovery & column permission enforcement... ');
+    
+    // A. Direct table query for must_change_password or student_id MUST be rejected by PostgreSQL column-level grants
+    let directMustChangePasswordDenied = false;
+    try {
+      await withAuthenticatedSession(client, user1Id, async () => {
+        await client.query(`SELECT must_change_password FROM public.profiles WHERE id = '${user1Id}';`);
+      });
+    } catch (err) {
+      if (err.message.includes('permission denied for column must_change_password') || err.message.includes('permission denied')) {
+        directMustChangePasswordDenied = true;
+      }
+    }
+
+    // B. Call get_my_profile_fallback() RPC as authenticated caller — MUST SUCCEED with sensitive fields
+    const fallbackRpcRes = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT * FROM public.get_my_profile_fallback();`);
+    });
+    const fallbackRow = fallbackRpcRes.rows[0];
+
+    // C. Call my_profile view as authenticated caller — MUST SUCCEED with caller's own fields
+    const myProfileViewRes = await withAuthenticatedSession(client, user1Id, async () => {
+      return await client.query(`SELECT * FROM public.my_profile;`);
+    });
+    const viewRow = myProfileViewRes.rows[0];
+
+    // D. Cross-user isolation: User 2 calling get_my_profile_fallback gets User 2's data only
+    const user2FallbackRes = await withAuthenticatedSession(client, user2Id, async () => {
+      return await client.query(`SELECT * FROM public.get_my_profile_fallback();`);
+    });
+    const user2FallbackRow = user2FallbackRes.rows[0];
+
+    // E. Anonymous caller executing get_my_profile_fallback() MUST BE DENIED
+    let anonFallbackDenied = false;
+    try {
+      await client.query(`BEGIN; SET LOCAL ROLE anon;`);
+      await client.query(`SELECT * FROM public.get_my_profile_fallback();`);
+      await client.query(`COMMIT;`);
+    } catch (err) {
+      await client.query(`ROLLBACK;`).catch(() => {});
+      if (err.message.includes('permission denied for function get_my_profile_fallback') || err.message.includes('permission denied') || err.message.includes('42501')) {
+        anonFallbackDenied = true;
+      }
+    }
+
+    // F. Test check_login_rate_limit & audit_login_attempt
+    const rateLimitInitial = await client.query(`SELECT public.check_login_rate_limit('test_rate@campus.internal') AS allowed;`);
+    const rateAllowedInitial = rateLimitInitial.rows[0]?.allowed;
+
+    if (
+      directMustChangePasswordDenied &&
+      fallbackRow && fallbackRow.id === user1Id && fallbackRow.student_id === testRoll &&
+      viewRow && viewRow.id === user1Id && viewRow.student_id === testRoll &&
+      user2FallbackRow && user2FallbackRow.id === user2Id &&
+      anonFallbackDenied &&
+      rateAllowedInitial === true
+    ) {
+      console.log('PASSED (Direct column query denied; fallback RPC & view succeed for caller; anon access denied; rate limiter verified)');
+      passed++;
+    } else {
+      throw new Error(`Fallback permission test failed: directDenied=${directMustChangePasswordDenied}, fallbackRow=${JSON.stringify(fallbackRow)}, viewRow=${JSON.stringify(viewRow)}, anonDenied=${anonFallbackDenied}`);
+    }
+
     console.log(`\n>> Result for [${testContextName}]: ${passed}/${total} tests PASSED.`);
 
   } finally {

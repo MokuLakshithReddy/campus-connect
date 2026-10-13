@@ -128,47 +128,90 @@ describe("Auth Route Guards & Profile Resolution End-to-End DOM Tests", () => {
     expect(screen.queryByTestId("protected-content")).not.toBeInTheDocument();
   });
 
-  it("successfully recovers and renders protected route when fallback query succeeds", async () => {
+  it("successfully recovers and renders protected route when fallback RPC succeeds", async () => {
     const mockUser = { id: "user-test-2", email: "25mvcsmr0002@campus.internal" };
     const mockSession = { user: mockUser, access_token: "mock-token" };
 
     mockGetSession.mockResolvedValue({ data: { session: mockSession }, error: null });
 
-    // Primary RPC fails
-    mockRpc.mockResolvedValue({
-      data: null,
-      error: { message: "RPC timeout" },
-    });
-
-    // Fallback query succeeds with complete, valid profile
-    mockFrom.mockReturnValue({
-      select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockReturnValue({
-          maybeSingle: vi.fn().mockResolvedValue({
-            data: {
-              id: "user-test-2",
-              username: "25MVCSMR0002",
-              college_role: "student",
-              is_verified: true,
-              department: "Computer Science",
-              year: "1st Year",
-              branch_id: "b-cs-aiml",
-              must_change_password: false,
-              student_id: "25MVCSMR0002",
-            },
-            error: null,
-          }),
-        }),
-      }),
+    // Primary get_my_profile RPC fails, but fallback RPC get_my_profile_fallback succeeds
+    mockRpc.mockImplementation((rpcName: string) => {
+      if (rpcName === "get_my_profile") {
+        return Promise.resolve({ data: null, error: { message: "Primary RPC timeout" } });
+      }
+      if (rpcName === "get_my_profile_fallback") {
+        return Promise.resolve({
+          data: {
+            id: "user-test-2",
+            username: "25MVCSMR0002",
+            college_role: "student",
+            is_verified: true,
+            department: "Computer Science",
+            year: "1st Year",
+            branch_id: "b-cs-aiml",
+            must_change_password: false,
+            student_id: "25MVCSMR0002",
+          },
+          error: null,
+        });
+      }
+      return Promise.resolve({ data: null, error: null });
     });
 
     renderWithRouter("/");
 
-    // Fallback should grant access to protected route
+    // Fallback RPC should grant access to protected route
     await waitFor(() => {
       expect(screen.getByTestId("protected-content")).toBeInTheDocument();
     });
 
+    expect(screen.queryByText("Profile Access Restricted")).not.toBeInTheDocument();
+  });
+
+  it("successfully recovers through my_profile view when both primary and fallback RPCs fail", async () => {
+    const mockUser = { id: "user-test-2b", email: "25mvcsmr002b@campus.internal" };
+    const mockSession = { user: mockUser, access_token: "mock-token" };
+
+    mockGetSession.mockResolvedValue({ data: { session: mockSession }, error: null });
+
+    // Both RPCs fail
+    mockRpc.mockImplementation((rpcName: string) => {
+      return Promise.resolve({ data: null, error: { message: `RPC ${rpcName} unavailable` } });
+    });
+
+    // View query to my_profile succeeds
+    mockFrom.mockImplementation((tableOrView: string) => {
+      if (tableOrView === "my_profile") {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              maybeSingle: vi.fn().mockResolvedValue({
+                data: {
+                  id: "user-test-2b",
+                  username: "25MVCSMR002B",
+                  college_role: "student",
+                  is_verified: true,
+                  department: "Computer Science",
+                  year: "1st Year",
+                  branch_id: "b-cs-aiml",
+                  must_change_password: false,
+                  student_id: "25MVCSMR002B",
+                },
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+      return { select: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) }) }) };
+    });
+
+    renderWithRouter("/");
+
+    // my_profile view grants access
+    await waitFor(() => {
+      expect(screen.getByTestId("protected-content")).toBeInTheDocument();
+    });
     expect(screen.queryByText("Profile Access Restricted")).not.toBeInTheDocument();
   });
 

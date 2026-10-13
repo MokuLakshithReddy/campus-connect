@@ -2705,5 +2705,146 @@ BEGIN
 END;
 $$;
 
+-- =============================================================================
+-- PROFILE FALLBACK RPC, MY_PROFILE VIEW & ACTIVATION SECURITY
+-- =============================================================================
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS activation_expires_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ;
+
+CREATE OR REPLACE FUNCTION public.get_my_profile_fallback()
+RETURNS TABLE (
+  id UUID,
+  username TEXT,
+  student_id TEXT,
+  college_role TEXT,
+  is_verified BOOLEAN,
+  must_change_password BOOLEAN,
+  department TEXT,
+  year TEXT,
+  branch_id UUID,
+  bio TEXT,
+  avatar_url TEXT,
+  activation_expires_at TIMESTAMPTZ,
+  activated_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ
+)
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+AS $$
+  SELECT 
+    p.id,
+    p.username,
+    p.student_id,
+    p.college_role,
+    p.is_verified,
+    p.must_change_password,
+    p.department,
+    p.year,
+    p.branch_id,
+    p.bio,
+    p.avatar_url,
+    p.activation_expires_at,
+    p.activated_at,
+    p.created_at,
+    p.updated_at
+  FROM public.profiles p
+  WHERE p.id = auth.uid();
+$$;
+
+REVOKE ALL ON FUNCTION public.get_my_profile_fallback() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_my_profile_fallback() TO authenticated;
+
+CREATE OR REPLACE VIEW public.my_profile AS
+SELECT 
+  p.id,
+  p.username,
+  p.student_id,
+  p.college_role,
+  p.is_verified,
+  p.must_change_password,
+  p.department,
+  p.year,
+  p.branch_id,
+  p.bio,
+  p.avatar_url,
+  p.activation_expires_at,
+  p.activated_at,
+  p.created_at,
+  p.updated_at
+FROM public.profiles p
+WHERE p.id = auth.uid();
+
+REVOKE ALL ON public.my_profile FROM PUBLIC, anon;
+GRANT SELECT ON public.my_profile TO authenticated;
+
+CREATE TABLE IF NOT EXISTS public.auth_login_audit (
+  id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+  identifier TEXT NOT NULL,
+  attempt_time TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  success BOOLEAN NOT NULL,
+  failure_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_login_audit_identifier_time 
+  ON public.auth_login_audit(identifier, attempt_time DESC);
+
+ALTER TABLE public.auth_login_audit ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.auth_login_audit FROM PUBLIC, anon;
+GRANT ALL ON public.auth_login_audit TO postgres;
+
+CREATE OR REPLACE FUNCTION public.audit_login_attempt(
+  p_identifier TEXT,
+  p_success BOOLEAN,
+  p_failure_reason TEXT DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  INSERT INTO public.auth_login_audit (identifier, attempt_time, success, failure_reason)
+  VALUES (
+    pg_catalog.lower(pg_catalog.trim(p_identifier)),
+    pg_catalog.clock_timestamp(),
+    p_success,
+    p_failure_reason
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.audit_login_attempt(TEXT, BOOLEAN, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.audit_login_attempt(TEXT, BOOLEAN, TEXT) TO authenticated, anon;
+
+CREATE OR REPLACE FUNCTION public.check_login_rate_limit(
+  p_identifier TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = ''
+AS $$
+DECLARE
+  v_recent_failures INT;
+BEGIN
+  SELECT count(*) INTO v_recent_failures
+  FROM public.auth_login_audit
+  WHERE identifier = pg_catalog.lower(pg_catalog.trim(p_identifier))
+    AND success = false
+    AND attempt_time > pg_catalog.clock_timestamp() - interval '15 minutes';
+  
+  RETURN (v_recent_failures < 5);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.check_login_rate_limit(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.check_login_rate_limit(TEXT) TO authenticated, anon;
+
+
 
 

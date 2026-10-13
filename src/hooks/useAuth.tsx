@@ -44,27 +44,53 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const fetchProfile = async (userId: string): Promise<UserProfile | null> => {
     try {
       // Primary secure path: fetch caller's own full profile via dedicated RPC
-      const { data: rpcData, error: rpcError } = await (supabase.rpc as any)("get_my_profile");
+      let rpcData: any = null;
+      let rpcError: any = null;
+      try {
+        const primaryRes = await (supabase.rpc as any)("get_my_profile");
+        rpcData = primaryRes?.data;
+        rpcError = primaryRes?.error;
+      } catch (pErr) {
+        rpcError = pErr;
+      }
 
       let fallbackData: any = null;
       let fallbackError: any = null;
 
       const primaryRow = Array.isArray(rpcData) ? rpcData[0] : rpcData;
 
-      // Fallback: If primary RPC failed or returned no data, query profiles table
-      // CRITICAL SECURITY: Must explicitly select must_change_password and student_id
+      // Fallback: If primary RPC failed or returned no data, query the dedicated fallback RPC / view
+      // CRITICAL SECURITY: Never query public.profiles directly for sensitive fields (denied by column-level grants)
       if (!primaryRow || rpcError) {
         if (rpcError) {
-          console.warn("Primary get_my_profile() RPC returned error, querying fallback profiles table:", rpcError);
+          console.warn("Primary get_my_profile() RPC returned error, querying fallback RPC:", rpcError);
         }
-        const fallbackRes = await supabase
-          .from("profiles")
-          .select("id, username, college_role, is_verified, department, year, branch_id, must_change_password, student_id")
-          .eq("id", userId)
-          .maybeSingle();
+        // Step 1: Query dedicated get_my_profile_fallback RPC
+        let fbRpcData: any = null;
+        let fbRpcError: any = null;
+        try {
+          const fbRpcRes = await (supabase.rpc as any)("get_my_profile_fallback");
+          fbRpcData = fbRpcRes?.data;
+          fbRpcError = fbRpcRes?.error;
+        } catch (fbErr) {
+          fbRpcError = fbErr;
+        }
 
-        fallbackData = fallbackRes.data;
-        fallbackError = fallbackRes.error;
+        const fbRow = Array.isArray(fbRpcData) ? fbRpcData[0] : fbRpcData;
+
+        if (fbRow && !fbRpcError) {
+          fallbackData = fbRow;
+          fallbackError = null;
+        } else {
+          // Step 2: Query caller's own my_profile view
+          const viewRes = await (supabase.from as any)("my_profile")
+            .select("id, username, college_role, is_verified, department, year, branch_id, must_change_password, student_id")
+            .eq("id", userId)
+            .maybeSingle();
+
+          fallbackData = viewRes.data;
+          fallbackError = viewRes.error || (viewRes.data ? null : fbRpcError);
+        }
       }
 
       const resolution = resolveProfileFromSources(primaryRow, rpcError, fallbackData, fallbackError);
@@ -169,14 +195,54 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const signIn = async (rollNumberOrEmail: string, password: string): Promise<boolean> => {
     const mappedEmail = normalizeIdentifierToEmail(rollNumberOrEmail);
+
+    // 1. Rate-limit check before attempting authentication
+    try {
+      const { data: isAllowed } = await (supabase.rpc as any)("check_login_rate_limit", {
+        p_identifier: mappedEmail,
+      });
+      if (isAllowed === false) {
+        throw new Error(
+          "Account temporarily locked due to multiple failed login attempts. Please wait 15 minutes before trying again."
+        );
+      }
+    } catch (rateLimitErr: any) {
+      if (rateLimitErr.message?.includes("Account temporarily locked")) {
+        throw rateLimitErr;
+      }
+    }
+
     const { data, error } = await supabase.auth.signInWithPassword({
       email: mappedEmail,
       password,
     });
-    if (error) throw error;
+
+    if (error) {
+      // Record failed attempt audit
+      try {
+        await (supabase.rpc as any)("audit_login_attempt", {
+          p_identifier: mappedEmail,
+          p_success: false,
+          p_failure_reason: error.message,
+        });
+      } catch (auditErr) {
+        console.debug("Login audit logging encountered error:", auditErr);
+      }
+      throw error;
+    }
 
     if (!data.user) {
       throw new Error("Authentication failed: No user returned by authentication provider.");
+    }
+
+    // Record successful login audit
+    try {
+      await (supabase.rpc as any)("audit_login_attempt", {
+        p_identifier: mappedEmail,
+        p_success: true,
+      });
+    } catch (auditErr) {
+      console.debug("Login audit logging encountered error:", auditErr);
     }
 
     const prof = await fetchProfile(data.user.id);
@@ -193,6 +259,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       throw new Error(
         "Account directory verification is pending or incomplete. Access to campus application routes is restricted."
       );
+    }
+
+    // Check activation credential expiration if initial password hasn't been changed yet
+    if (prof.must_change_password && (prof as any).activation_expires_at) {
+      const expiresAt = new Date((prof as any).activation_expires_at);
+      if (expiresAt.getTime() < Date.now()) {
+        throw new Error(
+          "Your initial activation credential has expired. Please contact campus administration to request a new activation link."
+        );
+      }
     }
 
     return prof.must_change_password;
