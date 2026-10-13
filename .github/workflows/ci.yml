@@ -55,9 +55,9 @@ jobs:
           DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/postgres"
         run: npm run test:db
 
-      - name: Production Build
+      - name: Build Web Application (Staging Integration)
         env:
-          VITE_SUPABASE_PROJECT_ID: "gtkvujspajcelzufpggr"
-          VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_fr0wwYVpS66JH1qHwbUxbA_QJ8uNjMk"
-          VITE_SUPABASE_URL: "https://gtkvujspajcelzufpggr.supabase.co"
+          VITE_SUPABASE_PROJECT_ID: ${{ secrets.STAGING_SUPABASE_PROJECT_ID || 'staging-campusconnect' }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.STAGING_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_staging_demo_key_restricted' }}
+          VITE_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL || 'https://staging-campusconnect.supabase.co' }}
         run: npm run build

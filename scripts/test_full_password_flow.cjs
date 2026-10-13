@@ -162,12 +162,17 @@ async function runPasswordFlowTest() {
 
   } finally {
     if (testUserId) {
+      console.log(`\n[Cleanup] Cleaning up disposable test user ${testUserId}...`);
       try {
-        console.log(`[Cleanup] Deleting disposable test user ${testUserId}...`);
+        await adminClient.from('profiles').delete().eq('id', testUserId);
+      } catch (profErr) {
+        console.warn('[Cleanup Notice] Profiles row cleanup:', profErr.message);
+      }
+      try {
         await adminClient.auth.admin.deleteUser(testUserId);
         console.log('- Disposable test user deleted successfully.');
       } catch (cleanErr) {
-        console.warn('Warning during test cleanup:', cleanErr.message);
+        console.warn('[Cleanup Warning] Auth user deletion:', cleanErr.message);
       }
     }
   }

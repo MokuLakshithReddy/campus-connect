@@ -29,11 +29,11 @@ jobs:
       - name: Install Node Dependencies
         run: npm ci
 
-      - name: Build Web Application
+      - name: Build Web Application (Staging Preview)
         env:
-          VITE_SUPABASE_PROJECT_ID: "gtkvujspajcelzufpggr"
-          VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_fr0wwYVpS66JH1qHwbUxbA_QJ8uNjMk"
-          VITE_SUPABASE_URL: "https://gtkvujspajcelzufpggr.supabase.co"
+          VITE_SUPABASE_PROJECT_ID: ${{ secrets.STAGING_SUPABASE_PROJECT_ID || 'staging-campusconnect' }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.STAGING_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_staging_demo_key_restricted' }}
+          VITE_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL || 'https://staging-campusconnect.supabase.co' }}
         run: npm run build
 
       - name: Sync Capacitor Android

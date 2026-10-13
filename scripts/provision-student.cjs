@@ -5,14 +5,43 @@
  */
 const https = require('https');
 
-const SUPABASE_PROJECT_URL = process.env.VITE_SUPABASE_URL
-  ? process.env.VITE_SUPABASE_URL.replace(/^https?:\/\//, '')
-  : 'gtkvujspajcelzufpggr.supabase.co';
+// Explicit target URL is required — no silent fallbacks to production
+const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+if (!rawSupabaseUrl || !rawSupabaseUrl.trim()) {
+  console.error("ERROR: SUPABASE_URL (or VITE_SUPABASE_URL) environment variable is strictly required.");
+  console.error("Implicit defaulting to production or hardcoded projects has been disabled for safety.");
+  console.error("Usage: SUPABASE_URL=https://<project-ref>.supabase.co SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME]");
+  process.exit(1);
+}
+
+let parsedUrl;
+try {
+  const normalizedInput = rawSupabaseUrl.startsWith('http://') || rawSupabaseUrl.startsWith('https://')
+    ? rawSupabaseUrl
+    : `https://${rawSupabaseUrl}`;
+  parsedUrl = new URL(normalizedInput);
+} catch (e) {
+  console.error(`ERROR: Malformed SUPABASE_URL: '${rawSupabaseUrl}'. Could not parse URL.`);
+  process.exit(1);
+}
+
+const hostname = parsedUrl.hostname;
+const isValidSupabaseHost = /^([a-z0-9_-]+)\.supabase\.(co|in|net)$/i.test(hostname) ||
+                             hostname === 'localhost' ||
+                             hostname === '127.0.0.1';
+
+if (!isValidSupabaseHost) {
+  console.error(`ERROR: Disallowed or unexpected Supabase URL hostname '${hostname}'.`);
+  console.error("Approved environment configuration requires a valid '*.supabase.co' project domain or localhost.");
+  process.exit(1);
+}
+
+const SUPABASE_PROJECT_URL = hostname;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!SERVICE_ROLE_KEY) {
   console.error("ERROR: SUPABASE_SERVICE_ROLE_KEY environment variable is required.");
-  console.error("Usage: SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME]");
+  console.error("Usage: SUPABASE_URL=https://<project-ref>.supabase.co SUPABASE_SERVICE_ROLE_KEY=<secret> node scripts/provision-student.cjs <ROLL_NUMBER> [DEPARTMENT] [YEAR] [FULL_NAME]");
   process.exit(1);
 }
 

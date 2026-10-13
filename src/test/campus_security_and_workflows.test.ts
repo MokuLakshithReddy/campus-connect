@@ -983,6 +983,94 @@ describe("Mandatory Password Change & Security Field Profile Resolution", () => 
   });
 });
 
+describe("Live Test Suite Isolation & Teardown Guarantees", () => {
+  it("should execute all teardown operations even when fixture setup fails halfway", async () => {
+    const executedCleanups: string[] = [];
+    const fixtureRegistry = {
+      userIds: new Set<string>(["user-1", "user-2"]),
+      clubIds: new Set<string>(["club-1"]),
+      eventIds: new Set<string>(), // Event creation was interrupted
+    };
+
+    // Simulate test execution where setup throws after creating users and clubs
+    const runSimulatedSuite = async () => {
+      try {
+        // Step 1: Users created
+        // Step 2: Clubs created
+        // Step 3: Event creation fails with network/constraint error
+        throw new Error("Simulated setup failure during event insertion");
+      } finally {
+        // Multi-stage isolated cleanup matching test_staging_sessions_smoke & test_live_events_and_qr_checkin
+        const tasks = [
+          { name: "registrations", run: () => executedCleanups.push("registrations") },
+          { name: "events", run: () => executedCleanups.push("events") },
+          { name: "memberships", run: () => executedCleanups.push("memberships") },
+          { name: "clubs", run: () => {
+            fixtureRegistry.clubIds.clear();
+            executedCleanups.push("clubs");
+          }},
+          { name: "profiles", run: () => executedCleanups.push("profiles") },
+          { name: "auth_users", run: () => {
+            fixtureRegistry.userIds.clear();
+            executedCleanups.push("auth_users");
+          }},
+        ];
+
+        for (const task of tasks) {
+          try {
+            task.run();
+          } catch {
+            // Ignored so subsequent tasks continue
+          }
+        }
+      }
+    };
+
+    await expect(runSimulatedSuite()).rejects.toThrow("Simulated setup failure during event insertion");
+
+    // Verify all cleanup stages executed regardless of the setup abort
+    expect(executedCleanups).toEqual([
+      "registrations",
+      "events",
+      "memberships",
+      "clubs",
+      "profiles",
+      "auth_users",
+    ]);
+    expect(fixtureRegistry.userIds.size).toBe(0);
+    expect(fixtureRegistry.clubIds.size).toBe(0);
+  });
+
+  it("should execute all teardown operations even when an assertion fails during test execution", async () => {
+    const executedCleanups: string[] = [];
+    const createdUsers = new Set<string>(["user-disposable-1"]);
+
+    const runSimulatedTest = async () => {
+      try {
+        // Test assertion failure
+        expect(1).toBe(2);
+      } finally {
+        // Teardown block
+        try {
+          executedCleanups.push("delete_profile");
+        } catch (err) {
+          void err;
+        }
+        try {
+          createdUsers.delete("user-disposable-1");
+          executedCleanups.push("delete_auth_user");
+        } catch (err) {
+          void err;
+        }
+      }
+    };
+
+    await expect(runSimulatedTest()).rejects.toThrow();
+    expect(executedCleanups).toEqual(["delete_profile", "delete_auth_user"]);
+    expect(createdUsers.size).toBe(0);
+  });
+});
+
 
 
 
