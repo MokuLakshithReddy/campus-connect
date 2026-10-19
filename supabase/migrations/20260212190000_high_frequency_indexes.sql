@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_events_published_start_time
 -- 5. Notifications (Unread & Chronological) High-Frequency Indexes
 CREATE INDEX IF NOT EXISTS idx_notifications_user_unread 
   ON public.notifications(user_id, created_at DESC) 
-  WHERE read = false;
+  WHERE is_read = false;
 
 CREATE INDEX IF NOT EXISTS idx_notifications_user_all 
   ON public.notifications(user_id, created_at DESC);
