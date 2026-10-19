@@ -260,7 +260,7 @@ const ClubWorkspace = () => {
     } finally {
       setLoading(false);
     }
-  }, [clubId, user?.id, selectedChannelId]);
+  }, [clubId, user?.id, selectedChannelId, searchParams]);
 
   const loadChannelMessages = useCallback(async (channelId: string) => {
     if (!channelId) return;

@@ -89,7 +89,11 @@ export const CameraQrScanner = ({ onScan, isProcessing = false }: CameraQrScanne
           if (isProcessing) return;
           const cleanToken = sanitizeScannedToken(decodedText);
           if (navigator.vibrate) {
-            try { navigator.vibrate(80); } catch (_) {}
+            try {
+              navigator.vibrate(80);
+            } catch {
+              // Ignore vibration failure if unsupported by browser/hardware
+            }
           }
           onScan(cleanToken);
         },
