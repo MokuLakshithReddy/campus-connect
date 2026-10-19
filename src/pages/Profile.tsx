@@ -361,6 +361,16 @@ const Profile = () => {
           {/* Profile Actions: Change Password & Edit Details */}
           {isOwn ? (
             <div className="mt-4 grid grid-cols-2 gap-2 pt-2 border-t border-border/60">
+              {profile?.college_role === "college_admin" && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="col-span-2 rounded-xl text-xs h-8 gap-1.5 bg-primary font-semibold shadow-sm"
+                  onClick={() => navigate("/admin")}
+                >
+                  <ShieldCheck className="h-4 w-4" /> Open College Admin Portal
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"

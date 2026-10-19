@@ -23,6 +23,7 @@ import {
   CheckCircle2,
   User,
   AlertCircle,
+  ShieldCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -264,6 +265,17 @@ const Index = () => {
           </div>
 
           <div className="flex items-center gap-1.5">
+            {profile?.college_role === "college_admin" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 px-2 text-xs gap-1 border-primary/40 text-primary hover:bg-primary/10"
+                onClick={() => navigate("/admin")}
+                title="College Administration Portal"
+              >
+                <ShieldCheck className="h-3.5 w-3.5" /> Admin
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"

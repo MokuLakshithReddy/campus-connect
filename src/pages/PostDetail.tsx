@@ -31,7 +31,7 @@ const PostDetail = () => {
       .eq("id", postId)
       .maybeSingle();
     if (!data) {
-      navigate("/", { replace: true });
+      navigate("/explore", { replace: true });
       return;
     }
     setPost(data as unknown as PostDetailItem);
@@ -42,7 +42,7 @@ const PostDetail = () => {
   }, [fetchPost]);
 
   const handlePostDeleted = () => {
-    navigate("/", { replace: true });
+    navigate("/explore", { replace: true });
   };
 
   return (

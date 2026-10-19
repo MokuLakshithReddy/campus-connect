@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import AppLayout from "@/components/AppLayout";
@@ -29,10 +29,12 @@ import {
   QrCode,
   CheckCircle2,
   Lock,
+  Camera,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import CameraQrScanner from "@/components/CameraQrScanner";
 import {
   Club,
   ClubMembership,
@@ -59,6 +61,7 @@ interface EventWithMeta extends CampusEvent {
 
 const ClubWorkspace = () => {
   const { clubId } = useParams<{ clubId: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user } = useAuth();
 
@@ -95,6 +98,7 @@ const ClubWorkspace = () => {
   const [checkInEventId, setCheckInEventId] = useState<string | null>(null);
   const [qrTokenInput, setQrTokenInput] = useState("");
   const [checkingIn, setCheckingIn] = useState(false);
+  const [checkInMode, setCheckInMode] = useState<"camera" | "manual">("camera");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -151,9 +155,14 @@ const ClubWorkspace = () => {
 
       const chList = (chData || []) as unknown as ClubChannel[];
       setChannels(chList);
-      if (chList.length > 0 && !selectedChannelId) {
-        const defaultCh = chList.find((c) => c.type === "announcements") || chList[0];
-        setSelectedChannelId(defaultCh.id);
+      if (chList.length > 0) {
+        const queryChannelId = searchParams.get("channel");
+        if (queryChannelId && chList.some((c) => c.id === queryChannelId)) {
+          setSelectedChannelId(queryChannelId);
+        } else if (!selectedChannelId) {
+          const defaultCh = chList.find((c) => c.type === "announcements") || chList[0];
+          setSelectedChannelId(defaultCh.id);
+        }
       }
 
       // 5. Fetch Members (active and pending)
@@ -500,15 +509,14 @@ const ClubWorkspace = () => {
   };
 
   // Server-validated QR ticket check-in for organizers
-  const handleCheckInAttendee = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!checkInEventId || !qrTokenInput.trim()) return;
+  const processTokenCheckIn = async (token: string) => {
+    if (!checkInEventId || !token.trim()) return;
 
     try {
       setCheckingIn(true);
       const { data, error } = await supabase.rpc("check_in_event_attendee", {
         p_event_id: checkInEventId,
-        p_qr_token: qrTokenInput.trim(),
+        p_qr_token: token.trim(),
       });
 
       if (error) throw error;
@@ -517,6 +525,8 @@ const ClubWorkspace = () => {
         toast.success(`Check-in verified! Welcome ${result.attendee_name || "attendee"}.`);
         setQrTokenInput("");
         setCheckInEventId(null);
+      } else {
+        toast.error("Ticket verification failed: Invalid ticket status");
       }
     } catch (err: unknown) {
       const error = err as Error;
@@ -524,6 +534,11 @@ const ClubWorkspace = () => {
     } finally {
       setCheckingIn(false);
     }
+  };
+
+  const handleCheckInAttendee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await processTokenCheckIn(qrTokenInput);
   };
 
   const handleToggleJoin = async () => {
@@ -1051,31 +1066,59 @@ const ClubWorkspace = () => {
 
         {/* Organizer Ticket Check-in Dialog */}
         <Dialog open={!!checkInEventId} onOpenChange={(open) => !open && setCheckInEventId(null)}>
-          <DialogContent className="max-w-xs p-5">
+          <DialogContent className="max-w-sm p-5">
             <DialogHeader>
-              <DialogTitle className="text-base font-bold flex items-center gap-1.5">
-                <QrCode className="h-5 w-5 text-primary" /> Scan / Verify Attendance
+              <DialogTitle className="text-base font-bold flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <QrCode className="h-5 w-5 text-primary" /> Scan / Verify Attendance
+                </span>
               </DialogTitle>
             </DialogHeader>
-            <form onSubmit={handleCheckInAttendee} className="space-y-3 pt-2">
-              <p className="text-xs text-muted-foreground">
-                Enter the attendee's 8-character Pass ID or token to validate their ticket.
-              </p>
-              <div className="space-y-1">
-                <Label htmlFor="qr-token">Pass ID / QR Token</Label>
-                <Input
-                  id="qr-token"
-                  placeholder="e.g. 3a5f8b9c"
-                  value={qrTokenInput}
-                  onChange={(e) => setQrTokenInput(e.target.value)}
-                  className="font-mono text-sm"
-                  required
+
+            <Tabs value={checkInMode} onValueChange={(v) => setCheckInMode(v as "camera" | "manual")} className="w-full mt-2">
+              <TabsList className="grid w-full grid-cols-2 mb-3">
+                <TabsTrigger value="camera" className="gap-1.5 text-xs">
+                  <Camera className="h-3.5 w-3.5" /> Camera Scanner
+                </TabsTrigger>
+                <TabsTrigger value="manual" className="gap-1.5 text-xs">
+                  <QrCode className="h-3.5 w-3.5" /> Manual Token
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="camera" className="mt-0">
+                <CameraQrScanner
+                  onScan={(scannedToken) => processTokenCheckIn(scannedToken)}
+                  isProcessing={checkingIn}
                 />
-              </div>
-              <Button type="submit" className="w-full" disabled={checkingIn}>
-                {checkingIn ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : "Confirm Attendance"}
-              </Button>
-            </form>
+                {checkingIn && (
+                  <div className="flex items-center justify-center gap-2 mt-2 text-xs text-primary font-medium">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Verifying scanned ticket...
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="manual" className="mt-0">
+                <form onSubmit={handleCheckInAttendee} className="space-y-3 pt-1">
+                  <p className="text-xs text-muted-foreground">
+                    Enter the attendee's 8-character Pass ID or token to validate their ticket.
+                  </p>
+                  <div className="space-y-1">
+                    <Label htmlFor="qr-token">Pass ID / QR Token</Label>
+                    <Input
+                      id="qr-token"
+                      placeholder="e.g. 3a5f8b9c"
+                      value={qrTokenInput}
+                      onChange={(e) => setQrTokenInput(e.target.value)}
+                      className="font-mono text-sm"
+                      required
+                    />
+                  </div>
+                  <Button type="submit" className="w-full" disabled={checkingIn}>
+                    {checkingIn ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : "Confirm Attendance"}
+                  </Button>
+                </form>
+              </TabsContent>
+            </Tabs>
           </DialogContent>
         </Dialog>
       </div>

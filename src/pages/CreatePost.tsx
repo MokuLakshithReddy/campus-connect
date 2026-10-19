@@ -94,7 +94,7 @@ const CreatePost = () => {
 
       revokePreview();
       toast.success("Post shared!");
-      navigate("/");
+      navigate("/explore");
     } catch (err: unknown) {
       const error = err as Error;
       toast.error(error.message || "Failed to create post");

@@ -3,7 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import AppLayout from "@/components/AppLayout";
 import { getAvatarUrl, getPostImageUrl } from "@/lib/supabase-helpers";
 import { useNavigate } from "react-router-dom";
-import { Search, User, Loader2, RefreshCw, AlertCircle, Filter } from "lucide-react";
+import { Search, User, Loader2, RefreshCw, AlertCircle, Filter, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { sanitizeSearchQuery } from "@/lib/utils";
@@ -279,6 +279,19 @@ const Explore = () => {
 
       {/* Posts Section */}
       <div className="p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h2 className="text-sm font-bold tracking-tight">Campus Posts</h2>
+            <p className="text-[11px] text-muted-foreground">Community photos & student updates</p>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => navigate("/create")}
+            className="h-7 text-xs rounded-full gap-1 shadow-sm"
+          >
+            <Plus className="h-3.5 w-3.5" /> Share Post
+          </Button>
+        </div>
         {errorPosts ? (
           <div className="p-6 text-center rounded-xl bg-destructive/10 border border-destructive/20 my-4">
             <AlertCircle className="h-8 w-8 text-destructive mx-auto mb-2" />
