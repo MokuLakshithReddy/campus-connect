@@ -47,7 +47,7 @@ const ChangePassword = () => {
       );
       // Short delay to ensure state and toast register smoothly before navigation
       setTimeout(() => {
-        navigate("/", { replace: true });
+        navigate(mustChangePassword ? "/" : "/profile", { replace: true });
       }, 100);
     } catch (err: unknown) {
       const error = err as Error;
@@ -172,7 +172,18 @@ const ChangePassword = () => {
               </Button>
             </form>
 
-            <div className="pt-2 border-t border-border/60 text-center">
+            <div className="pt-2 border-t border-border/60 text-center space-y-1.5">
+              {!mustChangePassword && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigate("/profile")}
+                  className="w-full text-xs text-muted-foreground hover:text-foreground h-9"
+                >
+                  Cancel / Return to Profile
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="sm"

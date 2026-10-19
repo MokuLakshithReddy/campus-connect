@@ -100,9 +100,9 @@ export const AdminRoute = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
-// Guard for the Mandatory Change Password screen
+// Guard for the Password Change screen (supports both mandatory onboarding and voluntary changes)
 export const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, profile, loading, mustChangePassword, profileError, refreshProfile, signOut } = useAuth();
+  const { user, profile, loading, profileError, refreshProfile, signOut } = useAuth();
   if (loading) return <PageLoader />;
   if (!user) return <Navigate to="/auth" replace />;
   if (profileError || !profile) {
@@ -125,8 +125,6 @@ export const ForcePasswordChangeRoute = ({ children }: { children: React.ReactNo
       />
     );
   }
-  // If already changed password, do not allow staying on change password screen
-  if (!mustChangePassword) return <Navigate to="/" replace />;
   return <>{children}</>;
 };
 

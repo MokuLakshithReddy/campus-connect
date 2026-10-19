@@ -418,7 +418,7 @@ describe("Auth Route Guards & Profile Resolution End-to-End DOM Tests", () => {
     expect(screen.queryByTestId("auth-page")).not.toBeInTheDocument();
   });
 
-  it("redirects away from change-password screen if user has already changed password", async () => {
+  it("allows existing users who already changed their password to access the change-password screen voluntarily", async () => {
     const mockUser = { id: "user-test-8", email: "25mvcsmr0008@campus.internal" };
     const mockSession = { user: mockUser, access_token: "mock-token" };
 
@@ -440,13 +440,12 @@ describe("Auth Route Guards & Profile Resolution End-to-End DOM Tests", () => {
       error: null,
     });
 
-    // Visiting "/change-password" when not required should redirect to "/"
+    // Visiting "/change-password" when must_change_password is false should permit voluntary password change
     renderWithRouter("/change-password");
 
     await waitFor(() => {
-      expect(screen.getByTestId("protected-content")).toBeInTheDocument();
+      expect(screen.getByTestId("change-password-page")).toBeInTheDocument();
     });
-    expect(screen.queryByTestId("change-password-page")).not.toBeInTheDocument();
   });
 
   it("blocks unverified accounts from entering campus routes", async () => {

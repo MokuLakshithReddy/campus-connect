@@ -1145,7 +1145,6 @@ describe("End-to-End Profile-Resolution Failure & Restricted Session State", () 
         return { rendered: "AuthErrorScreen", error: "Directory verification unverified" };
       }
       if (targetPath === "/change-password") {
-        if (!mustChangePasswordState) return { rendered: "Navigate", destination: "/" };
         return { rendered: "ChangePasswordPage" };
       }
       if (mustChangePasswordState) {
@@ -1207,6 +1206,10 @@ describe("End-to-End Profile-Resolution Failure & Restricted Session State", () 
     expect(simulateRouteNavigation("/")).toEqual({
       rendered: "ProtectedPage",
       path: "/",
+    });
+    // Existing users whose must_change_password is false can also access /change-password voluntarily
+    expect(simulateRouteNavigation("/change-password")).toEqual({
+      rendered: "ChangePasswordPage",
     });
 
     // Step 6b: Test Sign-Out behavior
