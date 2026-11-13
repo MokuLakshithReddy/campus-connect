@@ -20,6 +20,36 @@ Get the latest native Android APK directly on your phone:
 
 ---
 
+## At a glance
+
+![GitHub stars](https://img.shields.io/github/stars/MokuLakshithReddy/campus-connect?style=flat-square&label=stars)
+![GitHub forks](https://img.shields.io/github/forks/MokuLakshithReddy/campus-connect?style=flat-square&label=forks)
+![Open issues](https://img.shields.io/github/issues/MokuLakshithReddy/campus-connect?style=flat-square&label=open%20issues)
+![Last commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/campus-connect?style=flat-square)
+
+**Why it matters:** Campus information is often scattered across messages, social feeds, and separate event forms. CampusConnect gives clubs structured spaces and gives students one place to discover events, register, and present a QR pass at check-in.
+
+## Core user journey
+
+```mermaid
+flowchart TD
+    S["Verified student identity"] --> C["Discover clubs and campus events"]
+    C --> M["Join a club workspace"]
+    M --> CH["Announcements, discussion and project channels"]
+    C --> E["Register for an event"]
+    E --> Q["Generate unique QR attendance pass"]
+    Q --> V["Organizer verifies attendance"]
+    R["College admin / club organizer"] --> RBAC["Role-based permissions"]
+    RBAC --> M
+    RBAC --> E
+    RBAC --> V
+    RBAC --> DB[("PostgreSQL with Row Level Security")]
+    M --> DB
+    E --> DB
+    V --> DB
+```
+
+---
 ## ✨ Key Capabilities
 
 ### 1. 🏛️ Club-Specific Workspaces
