@@ -20,15 +20,6 @@ Get the latest native Android APK directly on your phone:
 
 ---
 
-## At a glance
-
-![GitHub stars](https://img.shields.io/github/stars/MokuLakshithReddy/campus-connect?style=flat-square&label=stars)
-![GitHub forks](https://img.shields.io/github/forks/MokuLakshithReddy/campus-connect?style=flat-square&label=forks)
-![Open issues](https://img.shields.io/github/issues/MokuLakshithReddy/campus-connect?style=flat-square&label=open%20issues)
-![Last commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/campus-connect?style=flat-square)
-
-**Why it matters:** Campus information is often scattered across messages, social feeds, and separate event forms. CampusConnect gives clubs structured spaces and gives students one place to discover events, register, and present a QR pass at check-in.
-
 ## Core user journey
 
 ```mermaid
@@ -48,6 +39,14 @@ flowchart TD
     E --> DB
     V --> DB
 ```
+
+### Verification and release evidence
+
+- The repository includes Vitest checks for profile privilege protection, membership authorization, and campus workflows, alongside separate scripts for PostgreSQL integration, Supabase directory, live-event/QR check-in, and security flows.
+- GitHub Actions workflows cover CI, Android APK builds/releases, and staging tests. Follow the [Actions runs](https://github.com/MokuLakshithReddy/campus-connect/actions) for the status of the current branch.
+- Android release builds are distributed through the [GitHub Releases page](https://github.com/MokuLakshithReddy/campus-connect/releases). Check the release page for the current artifact and version; the README's earlier APK link may not represent the newest package.
+
+---
 
 ---
 ## ✨ Key Capabilities
