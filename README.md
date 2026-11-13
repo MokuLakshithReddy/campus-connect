@@ -1,5 +1,8 @@
 # 🎓 CampusConnect — College Club & Event Management Platform
 
+[![Stars](https://img.shields.io/github/stars/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/stargazers) [![Forks](https://img.shields.io/github/forks/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/forks) [![Open Issues](https://img.shields.io/github/issues/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/issues) [![Last Commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/commits/main)
+
+
 [![Release](https://img.shields.io/badge/release-v1.2.0-blue.svg)](https://github.com/MokuLakshithReddy/campus-connect/releases/tag/v1.2.0)
 [![Android APK](https://img.shields.io/badge/platform-Android%20%7C%20Web-brightgreen.svg)](https://github.com/MokuLakshithReddy/campus-connect/releases/download/v1.2.0/campus-connect-v1.2.0.apk)
 [![Vite](https://img.shields.io/badge/frontend-Vite%20%2B%20React%20%2B%20TS-646CFF.svg)](https://vitejs.dev/)
