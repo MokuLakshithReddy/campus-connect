@@ -20,6 +20,28 @@ Get the latest native Android APK directly on your phone:
 
 ---
 
+## CampusConnect at a glance
+
+~~~mermaid
+flowchart TD
+    A["Student / organizer / college admin"] --> B["Authenticated campus workspace"]
+    B --> C["Club spaces and membership"]
+    B --> D["Campus events and registration"]
+    C --> E["Announcements, discussion and project rooms"]
+    D --> F["Capacity-aware registration and digital passes"]
+    F --> G["QR check-in workflow"]
+    C --> H["Member directory and role controls"]
+~~~
+
+### Verification and release evidence
+
+- The repository includes Vitest checks for profile privilege protection, membership authorization, and campus workflows, alongside separate scripts for PostgreSQL integration, Supabase directory, live-event/QR check-in, and security flows.
+- GitHub Actions workflows cover CI, Android APK builds/releases, and staging tests. Follow the [Actions runs](https://github.com/MokuLakshithReddy/campus-connect/actions) for the status of the current branch.
+- Android release builds are distributed through the [GitHub Releases page](https://github.com/MokuLakshithReddy/campus-connect/releases). Check the release page for the current artifact and version; the README's earlier APK link may not represent the newest package.
+
+**Why it matters:** club coordination, campus announcements, event discovery, registrations, and attendance are often spread across disconnected tools. CampusConnect brings those workflows into a role-aware campus workspace.
+
+---
 ## ✨ Key Capabilities
 
 ### 1. 🏛️ Club-Specific Workspaces
