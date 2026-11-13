@@ -1,5 +1,8 @@
 # 🎓 CampusConnect — College Club & Event Management Platform
 
+[![Stars](https://img.shields.io/github/stars/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/stargazers) [![Forks](https://img.shields.io/github/forks/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/forks) [![Open Issues](https://img.shields.io/github/issues/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/issues) [![Last Commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/campus-connect?style=flat-square)](https://github.com/MokuLakshithReddy/campus-connect/commits/main)
+
+
 [![Release](https://img.shields.io/badge/release-v1.2.0-blue.svg)](https://github.com/MokuLakshithReddy/campus-connect/releases/tag/v1.2.0)
 [![Android APK](https://img.shields.io/badge/platform-Android%20%7C%20Web-brightgreen.svg)](https://github.com/MokuLakshithReddy/campus-connect/releases/download/v1.2.0/campus-connect-v1.2.0.apk)
 [![Vite](https://img.shields.io/badge/frontend-Vite%20%2B%20React%20%2B%20TS-646CFF.svg)](https://vitejs.dev/)
@@ -20,6 +23,28 @@ Get the latest native Android APK directly on your phone:
 
 ---
 
+## CampusConnect at a glance
+
+~~~mermaid
+flowchart TD
+    A["Student / organizer / college admin"] --> B["Authenticated campus workspace"]
+    B --> C["Club spaces and membership"]
+    B --> D["Campus events and registration"]
+    C --> E["Announcements, discussion and project rooms"]
+    D --> F["Capacity-aware registration and digital passes"]
+    F --> G["QR check-in workflow"]
+    C --> H["Member directory and role controls"]
+~~~
+
+### Verification and release evidence
+
+- The repository includes Vitest checks for profile privilege protection, membership authorization, and campus workflows, alongside separate scripts for PostgreSQL integration, Supabase directory, live-event/QR check-in, and security flows.
+- GitHub Actions workflows cover CI, Android APK builds/releases, and staging tests. Follow the [Actions runs](https://github.com/MokuLakshithReddy/campus-connect/actions) for the status of the current branch.
+- Android release builds are distributed through the [GitHub Releases page](https://github.com/MokuLakshithReddy/campus-connect/releases). Check the release page for the current artifact and version; the README's earlier APK link may not represent the newest package.
+
+**Why it matters:** club coordination, campus announcements, event discovery, registrations, and attendance are often spread across disconnected tools. CampusConnect brings those workflows into a role-aware campus workspace.
+
+---
 ## ✨ Key Capabilities
 
 ### 1. 🏛️ Club-Specific Workspaces
